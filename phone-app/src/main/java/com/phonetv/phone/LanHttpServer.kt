@@ -29,6 +29,11 @@ class LanHttpServer(private val context: Context, private val catalog: MediaCata
         }
     }
     fun stop() { running = false; try { server?.close() } catch (_: Exception) {} }
+
+    private fun sharedVideos(): List<VideoItem> {
+        val disabled = context.getSharedPreferences("phone", Context.MODE_PRIVATE).getStringSet("disabledFolders", emptySet()) ?: emptySet()
+        return catalog.videos().filter { it.folder !in disabled }
+    }
     private fun handle(socket: Socket) {
         socket.soTimeout = 15000
         val input = BufferedInputStream(socket.getInputStream())
@@ -40,7 +45,7 @@ class LanHttpServer(private val context: Context, private val catalog: MediaCata
         val out = BufferedOutputStream(socket.getOutputStream())
         try {
             when {
-                path == "/api/device" -> respond(out, 200, "application/json", JSONObject().put("deviceId", id).put("deviceName", deviceName).put("videoCount", catalog.videos().size).put("version", "1.0").toString().toByteArray())
+                path == "/api/device" -> respond(out, 200, "application/json", JSONObject().put("deviceId", id).put("deviceName", deviceName).put("videoCount", sharedVideos().size).put("version", "1.0").toString().toByteArray())
                 path.startsWith("/api/videos/") && path.endsWith("/stream") -> {
                     val videoId = path.removePrefix("/api/videos/").substringBefore('/').toLongOrNull() ?: return notFound(out)
                     stream(out, videoId, range)
@@ -55,13 +60,13 @@ class LanHttpServer(private val context: Context, private val catalog: MediaCata
                     val query = parts[1].substringAfter('?', "").split('&').mapNotNull { pair -> pair.split('=', limit = 2).takeIf { it.size == 2 }?.let { it[0] to it[1] } }.toMap()
                     val page = (query["page"]?.toIntOrNull() ?: 1).coerceAtLeast(1); val size = (query["pageSize"]?.toIntOrNull() ?: 50).coerceIn(1, 100)
                     val keyword = query["keyword"]?.lowercase(); val folder = query["folder"]
-                    val filtered = catalog.videos().filter { (keyword == null || it.name.lowercase().contains(keyword)) && (folder == null || it.folder == folder) }
+                    val filtered = sharedVideos().filter { (keyword == null || it.name.lowercase().contains(keyword)) && (folder == null || it.folder == folder) }
                     val host = socket.localAddress.hostAddress
                     val json = """{"page":$page,"pageSize":$size,"total":${filtered.size},"items":${catalog.json(filtered.drop((page-1)*size).take(size), host)}}"""
                     respond(out, 200, "application/json", json.toByteArray())
                 }
                 path == "/api/folders" -> {
-                    val folders = JSONArray().apply { catalog.videos().groupBy { it.folder }.forEach { (name, videos) -> put(JSONObject().put("id", name.lowercase()).put("name", name).put("videoCount", videos.size)) } }
+                    val folders = JSONArray().apply { sharedVideos().groupBy { it.folder }.forEach { (name, videos) -> put(JSONObject().put("id", name.lowercase()).put("name", name).put("videoCount", videos.size)) } }
                     respond(out, 200, "application/json", folders.toString().toByteArray())
                 }
                 else -> notFound(out)

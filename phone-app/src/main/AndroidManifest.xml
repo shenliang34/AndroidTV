@@ -7,7 +7,7 @@
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
-    <application android:theme="@android:style/Theme.Material.Light.NoActionBar" android:label="手机视频共享" android:usesCleartextTraffic="true">
+    <application android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:label="视频共享" android:usesCleartextTraffic="true">
         <activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity>
         <service android:name=".MediaServerService" android:exported="false" android:foregroundServiceType="mediaPlayback" />
     </application>
