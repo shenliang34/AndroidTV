@@ -13,12 +13,17 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Pause
@@ -84,6 +89,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(background = Bg, primary = Cyan)) {
                 Surface(Modifier.fillMaxSize(), color = Bg) {
+                    BackHandler(playing != null || folder != null || selected != null) { goBack() }
                     val current = playing
                     val currentFolder = folder
                     when {
@@ -156,44 +162,64 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun LibraryScreen() {
         val groups = videos.groupBy { it.folder }.entries.sortedByDescending { it.value.size }
-        Column(Modifier.fillMaxSize().screenInsets().padding(horizontal = 48.dp, vertical = 28.dp)) {
+        val online = selected != null
+        Column(Modifier.fillMaxSize().screenInsets().padding(horizontal = 28.dp, vertical = 12.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("片库", color = Color.White, fontSize = 42.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                Icon(Icons.Default.PhoneAndroid, null, tint = if (selected != null) Cyan else Color(0xFF8E949C))
-                Spacer(Modifier.width(8.dp))
-                Text(if (selected != null) "手机在线" else "未连接", color = if (selected != null) Cyan else Color(0xFF8E949C), fontSize = 18.sp)
-            }
-            Text("来自手机", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 28.dp, bottom = 16.dp))
-            if (groups.isEmpty()) {
-                Text(message, color = Sub, fontSize = 16.sp)
-            } else groups.forEach { (name, items) ->
-                FocusRow(onClick = { folder = name }) {
-                    Icon(Icons.Default.Folder, null, tint = Color.White)
-                    Spacer(Modifier.width(16.dp))
-                    Text(name, color = Color.White, fontSize = 22.sp)
-                    Spacer(Modifier.width(14.dp))
-                    Text("${items.size} 部", color = Color(0xFFD0D4DA), fontSize = 18.sp)
+                Column(Modifier.weight(1f)) {
+                    Text("片库", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold)
+                    Text("来自手机", color = Color(0xFFB7BDC6), fontSize = 14.sp)
+                }
+                Row(Modifier.clip(RoundedCornerShape(24.dp)).background(if (online) Cyan else Color(0xFF2A3138)).padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.PhoneAndroid, null, tint = if (online) Color.White else Color(0xFFB7BDC6), modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (online) "手机在线" else "未连接", color = if (online) Color.White else Color(0xFFB7BDC6), fontSize = 15.sp)
                 }
             }
-            Spacer(Modifier.weight(1f))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("设备：", color = Color.White, fontSize = 18.sp)
-                Icon(Icons.Default.PhoneAndroid, null, tint = if (selected != null) Cyan else Sub, modifier = Modifier.padding(horizontal = 8.dp))
-                Text(selected?.name ?: message, color = if (selected != null) Cyan else Sub, fontSize = 16.sp)
+            Spacer(Modifier.height(12.dp))
+            if (groups.isEmpty()) {
+                Text(message, color = Sub, fontSize = 16.sp)
+            } else {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    items(groups.toList(), key = { it.key }) { (name, items) ->
+                        FolderCard(name, items.size) { folder = name }
+                    }
+                }
             }
+            Spacer(Modifier.height(18.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.width(28.dp).height(3.dp).clip(RoundedCornerShape(2.dp)).background(Cyan))
+                Spacer(Modifier.width(12.dp))
+                Text("设备", color = Color.White, fontSize = 16.sp)
+                Spacer(Modifier.width(12.dp))
+                Text(if (online) "手机在线" else message, color = if (online) Cyan else Sub, fontSize = 16.sp)
+            }
+        }
+    }
+
+    @Composable
+    private fun FolderCard(name: String, count: Int, onClick: () -> Unit) {
+        var focused by remember { mutableStateOf(false) }
+        Column(Modifier.width(132.dp).height(132.dp).shadow(if (focused) 18.dp else 0.dp, RoundedCornerShape(16.dp), ambientColor = Cyan, spotColor = Cyan).clip(RoundedCornerShape(16.dp)).background(Color(0xFF1B2128)).border(if (focused) 3.dp else 0.dp, Cyan, RoundedCornerShape(16.dp)).onFocusChanged { focused = it.isFocused }.focusable().clickable(onClick = onClick), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+            Icon(Icons.Default.Folder, null, tint = Color.White, modifier = Modifier.size(32.dp))
+            Spacer(Modifier.height(8.dp))
+            Text(name, color = Color.White, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("$count 部", color = Color(0xFFE6E8EB), fontSize = 14.sp, modifier = Modifier.padding(top = 4.dp))
         }
     }
 
     @Composable
     private fun FolderScreen(name: String) {
         val items = videos.filter { it.folder == name }
-        BackHandler { folder = null }
-        BoxWithConstraints(Modifier.fillMaxSize().screenInsets()) {
+        BackHandler { goBack() }
+        BoxWithConstraints(Modifier.fillMaxSize().screenInsets().background(Color(0xFF0B0E14))) {
             val phone = maxWidth < 700.dp
-            Column(Modifier.fillMaxSize().padding(horizontal = if (phone) 16.dp else 42.dp, vertical = if (phone) 16.dp else 32.dp)) {
-                Text(name, color = Color.White, fontSize = if (phone) 22.sp else 34.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, lineHeight = if (phone) 28.sp else 40.sp, modifier = Modifier.fillMaxWidth())
-                Text("来自手机 · ${items.size} 部", color = Sub, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp, bottom = 18.dp))
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.fillMaxSize().padding(start = if (phone) 16.dp else 48.dp, top = if (phone) 18.dp else 36.dp, bottom = 24.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.ArrowBack, "返回", tint = Color.White, modifier = Modifier.size(28.dp).clickable { goBack() }.padding(end = 10.dp))
+                    Text(name, color = Color.White, fontSize = if (phone) 28.sp else 42.sp, fontWeight = FontWeight.Bold)
+                }
+                Text("来自手机 · ${items.size} 部", color = Color(0xFFB7BDC6), fontSize = if (phone) 14.sp else 18.sp, modifier = Modifier.padding(top = 6.dp, bottom = if (phone) 16.dp else 28.dp))
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(if (phone) 12.dp else 22.dp), verticalAlignment = Alignment.Bottom, modifier = Modifier.fillMaxWidth().weight(1f), contentPadding = PaddingValues(end = 36.dp)) {
                     items(items, key = { it.id }) { video -> PosterCard(video, phone) { play(video) } }
                 }
             }
@@ -203,12 +229,14 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun PosterCard(video: RemoteVideo, phone: Boolean, onClick: () -> Unit) {
         var focused by remember { mutableStateOf(false) }
-        val width = if (phone) 132.dp else if (focused) 210.dp else 168.dp
-        Column(Modifier.width(width).onFocusChanged { focused = it.isFocused }.clickable(onClick = onClick).focusable()) {
-            Box(Modifier.fillMaxWidth().height(if (phone) 186.dp else if (focused) 300.dp else 236.dp).clip(RoundedCornerShape(12.dp)).background(Color(0xFF1C2026)).border(if (focused) 2.dp else 0.dp, Cyan, RoundedCornerShape(12.dp))) {
+        val width = if (phone) 132.dp else if (focused) 230.dp else 168.dp
+        val height = if (phone) 186.dp else if (focused) 330.dp else 236.dp
+        Column(Modifier.width(width).onFocusChanged { focused = it.isFocused }.focusable().clickable(onClick = onClick), horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(Modifier.fillMaxWidth().height(height).shadow(if (focused) 28.dp else 0.dp, RoundedCornerShape(16.dp), ambientColor = Cyan, spotColor = Cyan).clip(RoundedCornerShape(16.dp)).background(Color(0xFF1C2026)).border(if (focused) 3.dp else 0.dp, Cyan, RoundedCornerShape(16.dp))) {
                 AsyncImage(model = video.thumbnail, contentDescription = video.name, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             }
-            Text(video.name.substringBefore('.'), color = Color.White, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 18.sp, modifier = Modifier.padding(top = 8.dp).fillMaxWidth())
+            Text(video.name.substringBefore('.'), color = Color.White, fontSize = if (focused) 18.sp else 14.sp, fontWeight = if (focused) FontWeight.Bold else FontWeight.Normal, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 20.sp, modifier = Modifier.padding(top = 10.dp).fillMaxWidth())
+            Text(formatDuration(video.duration), color = Color(0xFFB7BDC6), fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp).fillMaxWidth())
         }
     }
 
@@ -218,75 +246,97 @@ class MainActivity : ComponentActivity() {
         var position by remember { mutableLongStateOf(0L) }
         var duration by remember { mutableLongStateOf(video.duration) }
         var playingNow by remember { mutableStateOf(true) }
-        var speed by remember { mutableStateOf("--") }
+        var speedText by remember { mutableStateOf("--") }
+        var rate by remember { mutableFloatStateOf(1f) }
+        var controls by remember { mutableStateOf(true) }
+        var tick by remember { mutableIntStateOf(0) }
         val siblings = videos.filter { it.folder == video.folder }
-        BackHandler { stopPlayback() }
+        BackHandler { goBack() }
         DisposableEffect(Unit) {
             hideSystemBars()
             onDispose { showSystemBars() }
         }
-        LaunchedEffect(exo) {
+        LaunchedEffect(exo, tick) {
             while (true) {
                 position = exo?.currentPosition ?: 0L
                 duration = exo?.duration?.takeIf { it > 0 } ?: video.duration
                 playingNow = exo?.isPlaying == true
                 val bps = bandwidthMeter?.bitrateEstimate ?: 0L
-                speed = if (bps > 0) "%.2f Mbps".format(bps / 1_000_000.0) else "--"
+                speedText = if (bps > 0) "%.2f Mbps".format(bps / 1_000_000.0) else "--"
                 delay(500)
             }
         }
-        Box(Modifier.fillMaxSize().background(Color.Black)) {
+        LaunchedEffect(tick, playingNow) {
+            if (!playingNow) { controls = true; return@LaunchedEffect }
+            controls = true
+            delay(4000)
+            controls = false
+        }
+        Box(Modifier.fillMaxSize().background(Color.Black).pointerInput(exo) {
+            detectTapGestures { tick++; controls = !controls }
+        }.pointerInput(exo) {
+            detectHorizontalDragGestures(
+                onDragStart = { controls = true; tick++ },
+                onHorizontalDrag = { _, dx ->
+                    tick++
+                    val jump = (dx * 120).toLong()
+                    exo?.seekTo((exo.currentPosition + jump).coerceIn(0, (exo.duration.takeIf { it > 0 } ?: Long.MAX_VALUE)))
+                }
+            )
+        }) {
             AndroidView(factory = { ctx -> PlayerView(ctx).apply { this.player = exo; useController = false } }, modifier = Modifier.fillMaxSize())
-            Column(Modifier.fillMaxSize()) {
-                Spacer(Modifier.weight(1f))
-                Column(Modifier.fillMaxWidth().background(Color(0xCC000000)).padding(horizontal = 12.dp, vertical = 10.dp)) {
-                    if (siblings.size > 1) {
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
-                            items(siblings, key = { it.id }) { item ->
-                                val active = item.id == video.id
-                                Text(item.name.substringBefore('.'), color = if (active) Cyan else Color.White, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 140.dp).clip(RoundedCornerShape(16.dp)).border(1.dp, if (active) Cyan else Color(0x88FFFFFF), RoundedCornerShape(16.dp)).clickable { play(item) }.focusable().padding(horizontal = 10.dp, vertical = 6.dp))
-                            }
+            if (controls) Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Color(0xCC000000)).padding(horizontal = 12.dp, vertical = 10.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 8.dp)) {
+                    listOf(0.75f, 1f, 1.25f, 1.5f, 2f).forEach { value ->
+                        val label = if (value == 1f) "1.0x" else "${value}x"
+                        Text(label, color = if (rate == value) Color.Black else Color.White, fontSize = 13.sp, modifier = Modifier.clip(RoundedCornerShape(14.dp)).background(if (rate == value) Cyan else Color.Transparent).border(1.dp, Cyan, RoundedCornerShape(14.dp)).clickable { rate = value; exo?.setPlaybackSpeed(value); tick++ }.focusable().padding(horizontal = 10.dp, vertical = 6.dp))
+                    }
+                }
+                if (siblings.size > 1) {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+                        items(siblings, key = { it.id }) { item ->
+                            val active = item.id == video.id
+                            Text(item.name.substringBefore('.'), color = if (active) Cyan else Color.White, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 140.dp).clip(RoundedCornerShape(16.dp)).border(if (active) 2.dp else 1.dp, if (active) Cyan else Color(0x88FFFFFF), RoundedCornerShape(16.dp)).clickable { play(item); tick++ }.focusable().padding(horizontal = 10.dp, vertical = 6.dp))
                         }
                     }
-                    val fraction = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
-                    Box(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).background(Color(0x66FFFFFF))) {
-                        Box(Modifier.fillMaxHeight().fillMaxWidth(fraction).background(Cyan))
-                    }
-                    Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(video.name.substringBefore('.'), color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                        Text("${formatClock(position)} / ${formatClock(duration)}", color = Color.White, fontSize = 12.sp)
-                        Spacer(Modifier.width(10.dp))
-                        Text(speed, color = Color.White, fontSize = 12.sp)
-                    }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                        RoundButton(Icons.Default.SkipPrevious) { playSibling(video, -1) }
-                        Spacer(Modifier.width(10.dp))
-                        RoundButton(Icons.Default.Replay10) { exo?.seekTo((exo.currentPosition - 10_000).coerceAtLeast(0)) }
-                        Spacer(Modifier.width(10.dp))
-                        Box(Modifier.size(64.dp).clip(CircleShape).border(2.dp, Cyan, CircleShape).clickable { if (exo?.isPlaying == true) exo.pause() else exo?.play() }.focusable(), contentAlignment = Alignment.Center) {
-                            Icon(if (playingNow) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = Color.White, modifier = Modifier.size(28.dp))
-                        }
-                        Spacer(Modifier.width(10.dp))
-                        RoundButton(Icons.Default.Forward10) { exo?.seekTo(exo.currentPosition + 10_000) }
-                        Spacer(Modifier.width(10.dp))
-                        RoundButton(Icons.Default.SkipNext) { playSibling(video, 1) }
-                    }
+                }
+                val fraction = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
+                Box(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).background(Color(0x66FFFFFF))) {
+                    Box(Modifier.fillMaxHeight().fillMaxWidth(fraction).background(Cyan))
+                }
+                Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(video.name.substringBefore('.'), color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    Text("${formatClock(position)} / ${formatClock(duration)}", color = Color.White, fontSize = 12.sp)
+                    Spacer(Modifier.width(10.dp))
+                    Text(speedText, color = Color.White, fontSize = 12.sp)
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                    RoundButton(Icons.Default.SkipPrevious) { playSibling(video, -1); tick++ }
+                    Spacer(Modifier.width(10.dp))
+                    RoundButton(Icons.Default.Replay10) { exo?.seekTo((exo.currentPosition - 10_000).coerceAtLeast(0)); tick++ }
+                    Spacer(Modifier.width(10.dp))
+                    RoundButton(if (playingNow) Icons.Default.Pause else Icons.Default.PlayArrow, emphasized = true) { if (exo?.isPlaying == true) exo.pause() else exo?.play(); tick++ }
+                    Spacer(Modifier.width(10.dp))
+                    RoundButton(Icons.Default.Forward10) { exo?.seekTo(exo.currentPosition + 10_000); tick++ }
+                    Spacer(Modifier.width(10.dp))
+                    RoundButton(Icons.Default.SkipNext) { playSibling(video, 1); tick++ }
                 }
             }
         }
     }
 
     @Composable
-    private fun RoundButton(icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
-        Box(Modifier.size(52.dp).clip(CircleShape).border(1.dp, Color(0x88FFFFFF), CircleShape).clickable(onClick = onClick).focusable(), contentAlignment = Alignment.Center) {
-            Icon(icon, null, tint = Color.White, modifier = Modifier.size(28.dp))
+    private fun RoundButton(icon: androidx.compose.ui.graphics.vector.ImageVector, emphasized: Boolean = false, onClick: () -> Unit) {
+        var focused by remember { mutableStateOf(false) }
+        Box(Modifier.size(if (emphasized) 64.dp else 52.dp).clip(CircleShape).background(if (focused) Cyan.copy(alpha = 0.28f) else Color.Transparent).border(if (focused) 3.dp else 1.dp, if (focused) Cyan else Color(0x88FFFFFF), CircleShape).onFocusChanged { focused = it.isFocused }.focusable().clickable(onClick = onClick), contentAlignment = Alignment.Center) {
+            Icon(icon, null, tint = Color.White, modifier = Modifier.size(if (emphasized) 30.dp else 24.dp))
         }
     }
 
     @Composable
     private fun FocusRow(onClick: () -> Unit, content: @Composable RowScope.() -> Unit) {
         var focused by remember { mutableStateOf(false) }
-        Row(Modifier.fillMaxWidth().padding(bottom = 12.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xFF23282F)).border(if (focused) 2.dp else 0.dp, Cyan, RoundedCornerShape(14.dp)).onFocusChanged { focused = it.isFocused }.clickable(onClick = onClick).focusable().padding(horizontal = 18.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically, content = content)
+        Row(Modifier.fillMaxWidth().padding(bottom = 12.dp).clip(RoundedCornerShape(14.dp)).background(if (focused) Color(0xFF24343A) else Color(0xFF23282F)).border(if (focused) 3.dp else 0.dp, Cyan, RoundedCornerShape(14.dp)).onFocusChanged { focused = it.isFocused }.focusable().clickable(onClick = onClick).padding(horizontal = 18.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically, content = content)
     }
 
     private fun playSibling(video: RemoteVideo, delta: Int) {
@@ -307,10 +357,7 @@ class MainActivity : ComponentActivity() {
                     override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
                         resolving.remove(serviceInfo.serviceName)
                         val host = serviceInfo.host?.hostAddress ?: return
-                        runOnUiThread {
-                            if (devices.none { it.host == host }) devices.add(PhoneDevice(serviceInfo.serviceName, host, serviceInfo.port))
-                            message = "选择一台手机"
-                        }
+                        runOnUiThread { addDevice(PhoneDevice(serviceInfo.serviceName, host, serviceInfo.port)) }
                     }
                 })
             }
@@ -334,12 +381,26 @@ class MainActivity : ComponentActivity() {
                     connection.inputStream.bufferedReader().use { JSONObject(it.readText()) }
                 } catch (_: Exception) { null }
             }
-            if (found != null && devices.none { it.host == "127.0.0.1" }) {
-                devices.add(0, PhoneDevice(found.optString("deviceName", "本机"), "127.0.0.1", 8080))
-                message = "选择一台手机"
-            }
+            if (found != null) addDevice(PhoneDevice(found.optString("deviceName", "本机"), "127.0.0.1", 8080))
         }
     }
+
+    private fun addDevice(device: PhoneDevice) {
+        val localHosts = localHosts()
+        val host = device.host.removePrefix("/").substringBefore('%')
+        val normalized = device.copy(host = host)
+        if (host == "127.0.0.1" && devices.any { it.host != "127.0.0.1" && it.host in localHosts }) return
+        if (host in localHosts && devices.any { it.host == "127.0.0.1" }) {
+            devices.removeAll { it.host == "127.0.0.1" }
+        }
+        if (devices.any { it.host == host || it.name == normalized.name }) return
+        devices.add(normalized)
+        message = "选择一台手机"
+    }
+
+    private fun localHosts(): Set<String> = try {
+        java.net.NetworkInterface.getNetworkInterfaces().toList().flatMap { it.inetAddresses.toList() }.mapNotNull { it.hostAddress?.removePrefix("/")?.substringBefore('%') }.toSet()
+    } catch (_: Exception) { emptySet() }
 
     private fun rescan() {
         message = "正在重新扫描…"
@@ -371,6 +432,15 @@ class MainActivity : ComponentActivity() {
         if (bandwidthMeter == null) bandwidthMeter = DefaultBandwidthMeter.Builder(this).build()
         player?.release()
         player = ExoPlayer.Builder(this).setBandwidthMeter(bandwidthMeter!!).build().also { it.setMediaItem(MediaItem.fromUri(video.stream)); it.prepare(); it.playWhenReady = true }
+    }
+
+    private fun goBack() {
+        when {
+            playing != null -> stopPlayback()
+            folder != null -> folder = null
+            selected != null -> { selected = null; videos.clear() }
+            else -> finish()
+        }
     }
 
     private fun stopPlayback() { player?.release(); player = null; playing = null }
