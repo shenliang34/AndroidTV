@@ -53,23 +53,37 @@ import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.ui.PlayerView
+import coil.ImageLoader
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
 import org.json.JSONObject
+import java.io.IOException
+import java.net.HttpURLConnection
 import java.net.URL
+import java.util.UUID
 
 data class PhoneDevice(val name: String, val host: String, val port: Int)
-data class RemoteVideo(val id: String, val name: String, val folder: String, val duration: Long, val size: Long, val thumbnail: String, val stream: String)
+data class RemoteVideo(val id: String, val name: String, val folder: String, val duration: Long, val size: Long, val thumbnail: String, val stream: String, val token: String)
+data class RemoteCatalog(val total: Int, val videos: List<RemoteVideo>)
 
 class MainActivity : ComponentActivity() {
     private val devices = mutableStateListOf<PhoneDevice>()
     private val videos = mutableStateListOf<RemoteVideo>()
     private var selected by mutableStateOf<PhoneDevice?>(null)
+    private var pairingDevice by mutableStateOf<PhoneDevice?>(null)
+    private var pairingPhoneId by mutableStateOf<String?>(null)
+    private var pairingCode by mutableStateOf("")
+    private var pairingError by mutableStateOf<String?>(null)
+    private var authToken by mutableStateOf<String?>(null)
+    private var serverVideoTotal by mutableIntStateOf(0)
     private var folder by mutableStateOf<String?>(null)
     private var playing by mutableStateOf<RemoteVideo?>(null)
     private var message by mutableStateOf("正在搜索手机…")
@@ -78,6 +92,18 @@ class MainActivity : ComponentActivity() {
     private var player: ExoPlayer? = null
     private var bandwidthMeter: DefaultBandwidthMeter? = null
     private val resolving = mutableSetOf<String>()
+    private val secureImageLoader by lazy {
+        ImageLoader.Builder(this).okHttpClient {
+            OkHttpClient.Builder().addInterceptor { chain ->
+                val request = chain.request()
+                val phone = selected
+                val token = authToken
+                if (phone != null && token != null && request.url.host == phone.host && request.url.port == phone.port) {
+                    chain.proceed(request.newBuilder().header("Authorization", "Bearer $token").build())
+                } else chain.proceed(request)
+            }.build()
+        }.build()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -156,6 +182,31 @@ class MainActivity : ComponentActivity() {
                 Spacer(Modifier.weight(1f))
                 Text("请打开手机端，并连到同一网络", color = Color(0xFFB7BDC6), fontSize = 15.sp, modifier = Modifier.fillMaxWidth(), maxLines = 1)
             }
+            val deviceToPair = pairingDevice
+            if (deviceToPair != null) {
+                AlertDialog(
+                    onDismissRequest = { dismissPairing() },
+                    title = { Text("连接 ${deviceToPair.name}") },
+                    text = {
+                        Column {
+                            Text("在手机共享页面查看 6 位配对码（有效期 5 分钟）。")
+                            Spacer(Modifier.height(12.dp))
+                            OutlinedTextField(
+                                value = pairingCode,
+                                onValueChange = { pairingCode = it.filter(Char::isDigit).take(6); pairingError = null },
+                                label = { Text("配对码") },
+                                singleLine = true,
+                                isError = pairingError != null
+                            )
+                            pairingError?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp) }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(enabled = pairingCode.length == 6, onClick = { pairAndConnect(deviceToPair, pairingPhoneId, pairingCode) }) { Text("配对") }
+                    },
+                    dismissButton = { TextButton(onClick = { dismissPairing() }) { Text("取消") } }
+                )
+            }
         }
     }
 
@@ -167,7 +218,7 @@ class MainActivity : ComponentActivity() {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("片库", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold)
-                    Text("来自手机", color = Color(0xFFB7BDC6), fontSize = 14.sp)
+                    Text("手机片库 · 已载入 ${videos.size} / $serverVideoTotal 部", color = Color(0xFFB7BDC6), fontSize = 14.sp)
                 }
                 Row(Modifier.clip(RoundedCornerShape(24.dp)).background(if (online) Cyan else Color(0xFF2A3138)).padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.PhoneAndroid, null, tint = if (online) Color.White else Color(0xFFB7BDC6), modifier = Modifier.size(18.dp))
@@ -233,7 +284,7 @@ class MainActivity : ComponentActivity() {
         val height = if (phone) 186.dp else if (focused) 330.dp else 236.dp
         Column(Modifier.width(width).onFocusChanged { focused = it.isFocused }.focusable().clickable(onClick = onClick), horizontalAlignment = Alignment.CenterHorizontally) {
             Box(Modifier.fillMaxWidth().height(height).shadow(if (focused) 28.dp else 0.dp, RoundedCornerShape(16.dp), ambientColor = Cyan, spotColor = Cyan).clip(RoundedCornerShape(16.dp)).background(Color(0xFF1C2026)).border(if (focused) 3.dp else 0.dp, Cyan, RoundedCornerShape(16.dp))) {
-                AsyncImage(model = video.thumbnail, contentDescription = video.name, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                AsyncImage(model = video.thumbnail, imageLoader = secureImageLoader, contentDescription = video.name, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             }
             Text(video.name.substringBefore('.'), color = Color.White, fontSize = if (focused) 18.sp else 14.sp, fontWeight = if (focused) FontWeight.Bold else FontWeight.Normal, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 20.sp, modifier = Modifier.padding(top = 10.dp).fillMaxWidth())
             Text(formatDuration(video.duration), color = Color(0xFFB7BDC6), fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp).fillMaxWidth())
@@ -411,34 +462,145 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun connect(device: PhoneDevice) {
-        selected = device
-        message = "正在读取视频…"
+        message = "正在连接手机…"
         lifecycleScope.launch {
             try {
-                val result = withContext(Dispatchers.IO) { JSONObject(URL("http://${device.host}:${device.port}/api/videos?page=1&pageSize=100").readText()) }
-                val list = result.getJSONArray("items")
-                videos.clear()
-                for (i in 0 until list.length()) {
-                    val v = list.getJSONObject(i)
-                    videos.add(RemoteVideo(v.getString("id"), v.getString("name"), v.optString("folder", "其他"), v.optLong("duration"), v.optLong("size"), v.optString("thumbnailUrl"), v.optString("streamUrl")))
+                val (phoneId, cachedToken) = withContext(Dispatchers.IO) {
+                    val info = requestJson(URL("http://${device.host}:${device.port}/api/device"))
+                    val id = info.getString("deviceId")
+                    id to getSharedPreferences("pairing", MODE_PRIVATE).getString("token_$id", null)
                 }
-                message = if (videos.isEmpty()) "手机上没有可共享的视频" else "已连接"
-            } catch (e: Exception) { message = "无法连接手机" }
+                if (!cachedToken.isNullOrBlank()) {
+                    try {
+                        val catalog = withContext(Dispatchers.IO) { loadVideos(device, cachedToken) }
+                        completeConnection(device, cachedToken, catalog)
+                        return@launch
+                    } catch (error: HttpStatusException) {
+                        if (error.statusCode != 401) throw error
+                        getSharedPreferences("pairing", MODE_PRIVATE).edit().remove("token_$phoneId").apply()
+                    }
+                }
+                pairingPhoneId = phoneId
+                pairingDevice = device
+                pairingCode = ""
+                pairingError = null
+                message = "请输入手机上的配对码"
+            } catch (_: Exception) { message = "无法连接手机，请确认手机共享已开启" }
         }
     }
+
+    private fun pairAndConnect(device: PhoneDevice, phoneId: String?, code: String) {
+        if (phoneId.isNullOrBlank()) {
+            pairingError = "手机信息无效，请返回重新连接"
+            return
+        }
+        pairingError = null
+        lifecycleScope.launch {
+            try {
+                val token = withContext(Dispatchers.IO) {
+                    val body = JSONObject()
+                        .put("code", code)
+                        .put("deviceId", tvDeviceId())
+                        .put("deviceName", android.os.Build.MODEL.ifBlank { "Android TV" })
+                        .toString()
+                    requestJson(URL("http://${device.host}:${device.port}/api/pair"), method = "POST", body = body).getString("token")
+                }
+                getSharedPreferences("pairing", MODE_PRIVATE).edit().putString("token_$phoneId", token).apply()
+                val catalog = withContext(Dispatchers.IO) { loadVideos(device, token) }
+                pairingDevice = null
+                pairingPhoneId = null
+                pairingCode = ""
+                completeConnection(device, token, catalog)
+            } catch (error: HttpStatusException) {
+                pairingError = if (error.statusCode == 401) "配对码错误、已过期或已使用，请检查手机上的新配对码。" else "配对失败（HTTP ${error.statusCode}）"
+            } catch (_: Exception) {
+                pairingError = "连接失败，请确认两台设备在同一网络且手机共享已开启。"
+            }
+        }
+    }
+
+    private fun dismissPairing() {
+        pairingDevice = null
+        pairingPhoneId = null
+        pairingCode = ""
+        pairingError = null
+    }
+
+    private fun tvDeviceId(): String {
+        val prefs = getSharedPreferences("pairing", MODE_PRIVATE)
+        return prefs.getString("deviceId", null) ?: UUID.randomUUID().toString().also { prefs.edit().putString("deviceId", it).apply() }
+    }
+
+    private fun loadVideos(device: PhoneDevice, token: String): RemoteCatalog {
+        val loaded = mutableListOf<RemoteVideo>()
+        var page = 1
+        var total = Int.MAX_VALUE
+        while (loaded.size < total) {
+            val result = requestJson(URL("http://${device.host}:${device.port}/api/videos?page=$page&pageSize=100"), token = token)
+            val items = result.getJSONArray("items")
+            total = result.optInt("total", loaded.size + items.length()).coerceAtLeast(0)
+            if (items.length() == 0) break
+            for (index in 0 until items.length()) {
+                val video = items.getJSONObject(index)
+                loaded += RemoteVideo(
+                    video.getString("id"), video.getString("name"), video.optString("folder", "其他"),
+                    video.optLong("duration"), video.optLong("size"), video.optString("thumbnailUrl"), video.optString("streamUrl"), token
+                )
+            }
+            page++
+        }
+        return RemoteCatalog(total.coerceAtMost(Int.MAX_VALUE), loaded)
+    }
+
+    private fun requestJson(url: URL, token: String? = null, method: String = "GET", body: String? = null): JSONObject {
+        val connection = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = method
+            connectTimeout = 5000
+            readTimeout = 10000
+            if (token != null) setRequestProperty("Authorization", "Bearer $token")
+            if (body != null) {
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            }
+        }
+        try {
+            if (body != null) connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            val status = connection.responseCode
+            if (status !in 200..299) throw HttpStatusException(status)
+            return connection.inputStream.bufferedReader(Charsets.UTF_8).use { JSONObject(it.readText()) }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun completeConnection(device: PhoneDevice, token: String, catalog: RemoteCatalog) {
+        authToken = token
+        videos.clear()
+        videos.addAll(catalog.videos)
+        serverVideoTotal = catalog.total
+        selected = device
+        message = if (catalog.total == 0) "手机上没有可共享的视频" else "已加载 ${videos.size} / ${catalog.total} 个视频"
+    }
+
+    private class HttpStatusException(val statusCode: Int) : IOException("HTTP $statusCode")
 
     private fun play(video: RemoteVideo) {
         playing = video
         if (bandwidthMeter == null) bandwidthMeter = DefaultBandwidthMeter.Builder(this).build()
         player?.release()
-        player = ExoPlayer.Builder(this).setBandwidthMeter(bandwidthMeter!!).build().also { it.setMediaItem(MediaItem.fromUri(video.stream)); it.prepare(); it.playWhenReady = true }
+        val httpFactory = DefaultHttpDataSource.Factory()
+            .setDefaultRequestProperties(mapOf("Authorization" to "Bearer ${video.token}"))
+            .setTransferListener(bandwidthMeter!!)
+        val mediaSourceFactory = DefaultMediaSourceFactory(httpFactory)
+        player = ExoPlayer.Builder(this).setMediaSourceFactory(mediaSourceFactory).setBandwidthMeter(bandwidthMeter!!).build()
+            .also { it.setMediaItem(MediaItem.fromUri(video.stream)); it.prepare(); it.playWhenReady = true }
     }
 
     private fun goBack() {
         when {
             playing != null -> stopPlayback()
             folder != null -> folder = null
-            selected != null -> { selected = null; videos.clear() }
+            selected != null -> { selected = null; authToken = null; videos.clear() }
             else -> finish()
         }
     }

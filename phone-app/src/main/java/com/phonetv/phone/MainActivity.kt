@@ -18,7 +18,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Tv
@@ -39,8 +39,8 @@ class MainActivity : ComponentActivity() {
     private var sharing by mutableStateOf(false)
     private var folders by mutableStateOf(listOf<FolderShare>())
     private var devices by mutableStateOf(listOf<ConnectedDevice>())
-    private var showAdd by mutableStateOf(false)
     private var menu by mutableStateOf(false)
+    private var pairingCode by mutableStateOf<String?>(null)
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { refresh() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -67,6 +67,7 @@ class MainActivity : ComponentActivity() {
                     IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "更多", tint = Color.White) }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         DropdownMenuItem(text = { Text("重新扫描") }, onClick = { menu = false; refresh() })
+                        if (sharing) DropdownMenuItem(text = { Text("刷新配对码") }, onClick = { menu = false; pairingCode = PairingStore(this@MainActivity).rotateCode() })
                     }
                 }
             }
@@ -80,6 +81,16 @@ class MainActivity : ComponentActivity() {
                         Text(if (sharing) "已开启，$enabledCount 个文件夹可被发现" else "未开启", color = Subtitle, fontSize = 13.sp)
                     }
                     Switch(checked = sharing, onCheckedChange = { if (it) startOrAsk() else stopSharing() }, colors = switchColors())
+                }
+                if (sharing) {
+                    HorizontalDivider(color = Divider, thickness = 0.5.dp)
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("TV 配对码", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                            Text("5 分钟有效，配对成功后立即失效", color = Subtitle, fontSize = 12.sp)
+                        }
+                        Text(pairingCode ?: "------", color = Teal, fontSize = 24.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp)
+                    }
                 }
             }
             SectionTitle("本机文件夹")
@@ -108,10 +119,10 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
-            SectionTitle("已连接设备")
+            SectionTitle("已授权电视")
             CardBlock {
                 if (devices.isEmpty()) {
-                    Text("还没有电视连接。电视打开应用后，会显示在这里。", color = Subtitle, modifier = Modifier.padding(16.dp), fontSize = 13.sp)
+                    Text("还没有授权电视。电视输入配对码后会显示在这里。", color = Subtitle, modifier = Modifier.padding(16.dp), fontSize = 13.sp)
                 } else devices.forEachIndexed { index, device ->
                     if (index > 0) HorizontalDivider(color = Divider, thickness = 0.5.dp)
                     Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -119,42 +130,21 @@ class MainActivity : ComponentActivity() {
                             Icon(Icons.Default.Tv, null, tint = if (device.online) Teal else Color(0xFF8E949C), modifier = Modifier.size(20.dp))
                         }
                         Spacer(Modifier.width(12.dp))
-                        Column {
+                        Column(Modifier.weight(1f)) {
                             Text(device.name, color = Color.White, fontSize = 16.sp)
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Box(Modifier.size(7.dp).clip(RoundedCornerShape(4.dp)).background(if (device.online) Online else Offline))
                                 Spacer(Modifier.width(6.dp))
-                                Text(if (device.online) "在线" else "离线", color = Subtitle, fontSize = 13.sp)
+                                Text("已授权", color = Subtitle, fontSize = 13.sp)
                             }
                         }
+                        IconButton(onClick = { revokeDevice(device.id) }) { Icon(Icons.Default.Delete, "撤销授权", tint = Subtitle) }
                     }
                 }
             }
             Spacer(Modifier.height(16.dp))
-            Row(
-                Modifier.fillMaxWidth().height(48.dp).clip(RoundedCornerShape(12.dp)).border(1.dp, Teal, RoundedCornerShape(12.dp)).clickable { showAdd = true },
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(Icons.Default.Add, null, tint = Teal, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("添加设备", color = Teal, fontSize = 16.sp)
-            }
             Spacer(Modifier.height(24.dp))
         }
-        if (showAdd) AddDeviceDialog()
-    }
-
-    @Composable
-    private fun AddDeviceDialog() {
-        var name by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { showAdd = false },
-            title = { Text("添加设备") },
-            text = { OutlinedTextField(name, { name = it }, label = { Text("电视名称") }, singleLine = true) },
-            confirmButton = { TextButton(onClick = { if (name.isNotBlank()) addDevice(name.trim()); showAdd = false }) { Text("添加") } },
-            dismissButton = { TextButton(onClick = { showAdd = false }) { Text("取消") } }
-        )
     }
 
     @Composable private fun SectionTitle(text: String) { Text(text, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 22.dp, bottom = 10.dp)) }
@@ -173,8 +163,10 @@ class MainActivity : ComponentActivity() {
         val videos = if (granted) try { catalog.scan() } catch (_: Exception) { emptyList() } else emptyList()
         val disabled = prefs().getStringSet("disabledFolders", emptySet()) ?: emptySet()
         folders = videos.groupBy { it.folder }.map { (name, items) -> FolderShare(name, items.size, name !in disabled) }.sortedByDescending { it.count }
-        devices = (prefs().getStringSet("devices", emptySet()) ?: emptySet()).map { ConnectedDevice(it, false) }
         sharing = MediaServerServiceState.running
+        val pairing = PairingStore(this)
+        devices = pairing.devices().map { ConnectedDevice(it.id, it.name, false) }
+        pairingCode = if (sharing) pairing.activeCode() else null
     }
     private fun setFolder(name: String, enabled: Boolean) {
         val disabled = (prefs().getStringSet("disabledFolders", emptySet()) ?: emptySet()).toMutableSet()
@@ -187,25 +179,24 @@ class MainActivity : ComponentActivity() {
         prefs().edit().putStringSet("disabledFolders", disabled).apply()
         folders = folders.map { it.copy(enabled = enabled) }
     }
-    private fun addDevice(name: String) {
-        val all = (prefs().getStringSet("devices", emptySet()) ?: emptySet()).toMutableSet()
-        all.add(name)
-        prefs().edit().putStringSet("devices", all).apply()
-        devices = all.map { ConnectedDevice(it, false) }
+    private fun revokeDevice(id: String) {
+        PairingStore(this).revoke(id)
+        devices = PairingStore(this).devices().map { ConnectedDevice(it.id, it.name, false) }
     }
     private fun startOrAsk() {
         if (ContextCompat.checkSelfPermission(this, mediaPermission()) != PackageManager.PERMISSION_GRANTED) { permissionRequest.launch(arrayOf(mediaPermission())); return }
         catalog.scan()
+        pairingCode = PairingStore(this).rotateCode()
         MediaServerServiceState.running = true
         ContextCompat.startForegroundService(this, Intent(this, MediaServerService::class.java))
         sharing = true
         refresh()
     }
-    private fun stopSharing() { stopService(Intent(this, MediaServerService::class.java)); MediaServerServiceState.running = false; sharing = false }
+    private fun stopSharing() { stopService(Intent(this, MediaServerService::class.java)); MediaServerServiceState.running = false; PairingStore(this).invalidateCode(); pairingCode = null; sharing = false }
 }
 
 data class FolderShare(val name: String, val count: Int, val enabled: Boolean)
-data class ConnectedDevice(val name: String, val online: Boolean)
+data class ConnectedDevice(val id: String, val name: String, val online: Boolean)
 object MediaServerServiceState { @Volatile var running: Boolean = false }
 
 private val Bg = Color(0xFF101114)
