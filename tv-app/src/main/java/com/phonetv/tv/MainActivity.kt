@@ -10,6 +10,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
@@ -19,6 +20,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -38,7 +40,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import android.view.KeyEvent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -124,6 +132,29 @@ class MainActivity : ComponentActivity() {
                         currentFolder != null -> FolderScreen(currentFolder)
                         else -> LibraryScreen()
                     }
+                    val deviceToPair = pairingDevice
+                    if (deviceToPair != null) {
+                        AlertDialog(
+                            onDismissRequest = { dismissPairing() },
+                            title = { Text("重新配对 ${deviceToPair.name}") },
+                            text = {
+                                Column {
+                                    Text("手机已撤销授权或配对已失效。请查看手机上新的 6 位配对码。")
+                                    Spacer(Modifier.height(12.dp))
+                                    OutlinedTextField(
+                                        value = pairingCode,
+                                        onValueChange = { pairingCode = it.filter(Char::isDigit).take(6); pairingError = null },
+                                        label = { Text("配对码") },
+                                        singleLine = true,
+                                        isError = pairingError != null
+                                    )
+                                    pairingError?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp) }
+                                }
+                            },
+                            confirmButton = { TextButton(enabled = pairingCode.length == 6, onClick = { pairAndConnect(deviceToPair, pairingPhoneId, pairingCode) }) { Text("配对") } },
+                            dismissButton = { TextButton(onClick = { dismissPairing() }) { Text("取消") } }
+                        )
+                    }
                 }
             }
         }
@@ -182,31 +213,6 @@ class MainActivity : ComponentActivity() {
                 Spacer(Modifier.weight(1f))
                 Text("请打开手机端，并连到同一网络", color = Color(0xFFB7BDC6), fontSize = 15.sp, modifier = Modifier.fillMaxWidth(), maxLines = 1)
             }
-            val deviceToPair = pairingDevice
-            if (deviceToPair != null) {
-                AlertDialog(
-                    onDismissRequest = { dismissPairing() },
-                    title = { Text("连接 ${deviceToPair.name}") },
-                    text = {
-                        Column {
-                            Text("在手机共享页面查看 6 位配对码（有效期 5 分钟）。")
-                            Spacer(Modifier.height(12.dp))
-                            OutlinedTextField(
-                                value = pairingCode,
-                                onValueChange = { pairingCode = it.filter(Char::isDigit).take(6); pairingError = null },
-                                label = { Text("配对码") },
-                                singleLine = true,
-                                isError = pairingError != null
-                            )
-                            pairingError?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp) }
-                        }
-                    },
-                    confirmButton = {
-                        TextButton(enabled = pairingCode.length == 6, onClick = { pairAndConnect(deviceToPair, pairingPhoneId, pairingCode) }) { Text("配对") }
-                    },
-                    dismissButton = { TextButton(onClick = { dismissPairing() }) { Text("取消") } }
-                )
-            }
         }
     }
 
@@ -215,18 +221,8 @@ class MainActivity : ComponentActivity() {
         val groups = videos.groupBy { it.folder }.entries.sortedByDescending { it.value.size }
         val online = selected != null
         Column(Modifier.fillMaxSize().screenInsets().padding(horizontal = 28.dp, vertical = 12.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("片库", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold)
-                    Text("手机片库 · 已载入 ${videos.size} / $serverVideoTotal 部", color = Color(0xFFB7BDC6), fontSize = 14.sp)
-                }
-                Row(Modifier.clip(RoundedCornerShape(24.dp)).background(if (online) Cyan else Color(0xFF2A3138)).padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.PhoneAndroid, null, tint = if (online) Color.White else Color(0xFFB7BDC6), modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(if (online) "手机在线" else "未连接", color = if (online) Color.White else Color(0xFFB7BDC6), fontSize = 15.sp)
-                }
-            }
-            Spacer(Modifier.height(12.dp))
+            PageHeader("片库", "已载入 ${videos.size} / $serverVideoTotal 部")
+            Spacer(Modifier.height(16.dp))
             if (groups.isEmpty()) {
                 Text(message, color = Sub, fontSize = 16.sp)
             } else {
@@ -250,7 +246,7 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun FolderCard(name: String, count: Int, onClick: () -> Unit) {
         var focused by remember { mutableStateOf(false) }
-        Column(Modifier.width(132.dp).height(132.dp).shadow(if (focused) 18.dp else 0.dp, RoundedCornerShape(16.dp), ambientColor = Cyan, spotColor = Cyan).clip(RoundedCornerShape(16.dp)).background(Color(0xFF1B2128)).border(if (focused) 3.dp else 0.dp, Cyan, RoundedCornerShape(16.dp)).onFocusChanged { focused = it.isFocused }.focusable().clickable(onClick = onClick), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+        Column(Modifier.width(124.dp).height(112.dp).clip(RoundedCornerShape(16.dp)).background(Color(0xFF1B2128)).border(if (focused) 2.dp else 0.dp, Cyan, RoundedCornerShape(16.dp)).onFocusChanged { focused = it.isFocused }.focusable().clickable(onClick = onClick), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
             Icon(Icons.Default.Folder, null, tint = Color.White, modifier = Modifier.size(32.dp))
             Spacer(Modifier.height(8.dp))
             Text(name, color = Color.White, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -261,33 +257,44 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun FolderScreen(name: String) {
         val items = videos.filter { it.folder == name }
+        var selectedIndex by remember(name) { mutableIntStateOf(if (items.isEmpty()) 0 else 1) }
         BackHandler { goBack() }
-        BoxWithConstraints(Modifier.fillMaxSize().screenInsets().background(Color(0xFF0B0E14))) {
-            val phone = maxWidth < 700.dp
-            Column(Modifier.fillMaxSize().padding(start = if (phone) 16.dp else 48.dp, top = if (phone) 18.dp else 36.dp, bottom = 24.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.ArrowBack, "返回", tint = Color.White, modifier = Modifier.size(28.dp).clickable { goBack() }.padding(end = 10.dp))
-                    Text(name, color = Color.White, fontSize = if (phone) 28.sp else 42.sp, fontWeight = FontWeight.Bold)
-                }
-                Text("来自手机 · ${items.size} 部", color = Color(0xFFB7BDC6), fontSize = if (phone) 14.sp else 18.sp, modifier = Modifier.padding(top = 6.dp, bottom = if (phone) 16.dp else 28.dp))
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(if (phone) 12.dp else 22.dp), verticalAlignment = Alignment.Bottom, modifier = Modifier.fillMaxWidth().weight(1f), contentPadding = PaddingValues(end = 36.dp)) {
-                    items(items, key = { it.id }) { video -> PosterCard(video, phone) { play(video) } }
+        Column(Modifier.fillMaxSize().screenInsets().background(Color(0xFF0B0E14)).padding(horizontal = 28.dp, vertical = 12.dp)) {
+            PageHeader(name, "来自手机 ${selectedIndex}/${items.size} 部")
+            Spacer(Modifier.height(16.dp))
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(end = 28.dp, bottom = 8.dp)) {
+                itemsIndexed(items, key = { _, video -> video.id }) { index, video ->
+                    PosterCard(video, onFocus = { selectedIndex = index + 1 }, onClick = { play(video) })
                 }
             }
         }
     }
 
     @Composable
-    private fun PosterCard(video: RemoteVideo, phone: Boolean, onClick: () -> Unit) {
+    private fun PosterCard(video: RemoteVideo, onFocus: () -> Unit, onClick: () -> Unit) {
         var focused by remember { mutableStateOf(false) }
-        val width = if (phone) 132.dp else if (focused) 230.dp else 168.dp
-        val height = if (phone) 186.dp else if (focused) 330.dp else 236.dp
-        Column(Modifier.width(width).onFocusChanged { focused = it.isFocused }.focusable().clickable(onClick = onClick), horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(Modifier.fillMaxWidth().height(height).shadow(if (focused) 28.dp else 0.dp, RoundedCornerShape(16.dp), ambientColor = Cyan, spotColor = Cyan).clip(RoundedCornerShape(16.dp)).background(Color(0xFF1C2026)).border(if (focused) 3.dp else 0.dp, Cyan, RoundedCornerShape(16.dp))) {
+        Column(Modifier.width(150.dp).onFocusChanged { focused = it.isFocused; if (it.isFocused) onFocus() }.focusable().clickable(onClick = onClick)) {
+            Box(Modifier.fillMaxWidth().height(150.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xFF1C2026)).border(if (focused) 2.dp else 0.dp, Cyan, RoundedCornerShape(14.dp))) {
                 AsyncImage(model = video.thumbnail, imageLoader = secureImageLoader, contentDescription = video.name, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             }
-            Text(video.name.substringBefore('.'), color = Color.White, fontSize = if (focused) 18.sp else 14.sp, fontWeight = if (focused) FontWeight.Bold else FontWeight.Normal, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 20.sp, modifier = Modifier.padding(top = 10.dp).fillMaxWidth())
-            Text(formatDuration(video.duration), color = Color(0xFFB7BDC6), fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp).fillMaxWidth())
+            Text(video.name.substringBefore('.'), color = Color.White, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp).fillMaxWidth().basicMarquee())
+        }
+    }
+
+    @Composable
+    private fun PageHeader(title: String, subtitle: String) {
+        Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(title, color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 280.dp).basicMarquee())
+            Spacer(Modifier.width(12.dp))
+            Text(subtitle, color = Color(0xFFB7BDC6), fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).basicMarquee())
+            BackButton()
+        }
+    }
+
+    @Composable
+    private fun BackButton() {
+        Box(Modifier.size(52.dp).clip(CircleShape).background(Color(0xFF23282F)).clickable { goBack() }, contentAlignment = Alignment.Center) {
+            Icon(Icons.Default.ArrowBack, "返回", tint = Color.White, modifier = Modifier.size(28.dp))
         }
     }
 
@@ -302,6 +309,25 @@ class MainActivity : ComponentActivity() {
         var controls by remember { mutableStateOf(true) }
         var tick by remember { mutableIntStateOf(0) }
         val siblings = videos.filter { it.folder == video.folder }
+        val focusRequester = remember { FocusRequester() }
+        val rates = listOf(0.75f, 1f, 1.25f, 1.5f, 2f)
+        fun showControls() { controls = true; tick++ }
+        fun seekBy(delta: Long) {
+            val target = ((exo?.currentPosition ?: 0L) + delta).coerceAtLeast(0)
+            val limit = exo?.duration?.takeIf { it > 0 } ?: Long.MAX_VALUE
+            exo?.seekTo(target.coerceAtMost(limit))
+            showControls()
+        }
+        fun togglePlay() {
+            if (exo?.isPlaying == true) exo.pause() else exo?.play()
+            showControls()
+        }
+        fun cycleRate() {
+            val next = rates[(rates.indexOf(rate) + 1).mod(rates.size)]
+            rate = next
+            exo?.setPlaybackSpeed(next)
+            showControls()
+        }
         BackHandler { goBack() }
         DisposableEffect(Unit) {
             hideSystemBars()
@@ -323,7 +349,20 @@ class MainActivity : ComponentActivity() {
             delay(4000)
             controls = false
         }
-        Box(Modifier.fillMaxSize().background(Color.Black).pointerInput(exo) {
+        LaunchedEffect(Unit) { focusRequester.requestFocus() }
+        Box(Modifier.fillMaxSize().background(Color.Black).focusRequester(focusRequester).focusable().onPreviewKeyEvent { event ->
+            if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+            when (event.nativeKeyEvent.keyCode) {
+                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_MEDIA_REWIND -> { seekBy(-10_000); true }
+                KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { seekBy(10_000); true }
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                    if (!controls) showControls() else togglePlay()
+                    true
+                }
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> { showControls(); false }
+                else -> false
+            }
+        }.pointerInput(exo) {
             detectTapGestures { tick++; controls = !controls }
         }.pointerInput(exo) {
             detectHorizontalDragGestures(
@@ -337,12 +376,6 @@ class MainActivity : ComponentActivity() {
         }) {
             AndroidView(factory = { ctx -> PlayerView(ctx).apply { this.player = exo; useController = false } }, modifier = Modifier.fillMaxSize())
             if (controls) Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Color(0xCC000000)).padding(horizontal = 12.dp, vertical = 10.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 8.dp)) {
-                    listOf(0.75f, 1f, 1.25f, 1.5f, 2f).forEach { value ->
-                        val label = if (value == 1f) "1.0x" else "${value}x"
-                        Text(label, color = if (rate == value) Color.Black else Color.White, fontSize = 13.sp, modifier = Modifier.clip(RoundedCornerShape(14.dp)).background(if (rate == value) Cyan else Color.Transparent).border(1.dp, Cyan, RoundedCornerShape(14.dp)).clickable { rate = value; exo?.setPlaybackSpeed(value); tick++ }.focusable().padding(horizontal = 10.dp, vertical = 6.dp))
-                    }
-                }
                 if (siblings.size > 1) {
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
                         items(siblings, key = { it.id }) { item ->
@@ -370,7 +403,9 @@ class MainActivity : ComponentActivity() {
                     Spacer(Modifier.width(10.dp))
                     RoundButton(Icons.Default.Forward10) { exo?.seekTo(exo.currentPosition + 10_000); tick++ }
                     Spacer(Modifier.width(10.dp))
-                    RoundButton(Icons.Default.SkipNext) { playSibling(video, 1); tick++ }
+                    RoundButton(Icons.Default.SkipNext) { playSibling(video, 1); showControls() }
+                    Spacer(Modifier.width(16.dp))
+                    Text(if (rate == 1f) "1.0x" else "${rate}x", color = Color.White, fontSize = 16.sp, modifier = Modifier.clip(RoundedCornerShape(18.dp)).border(1.dp, Color(0x88FFFFFF), RoundedCornerShape(18.dp)).clickable { cycleRate() }.focusable().padding(horizontal = 14.dp, vertical = 10.dp))
                 }
             }
         }
@@ -478,6 +513,14 @@ class MainActivity : ComponentActivity() {
                     } catch (error: HttpStatusException) {
                         if (error.statusCode != 401) throw error
                         getSharedPreferences("pairing", MODE_PRIVATE).edit().remove("token_$phoneId").apply()
+                        selected = null
+                        videos.clear()
+                        authToken = null
+                        pairingPhoneId = phoneId
+                        pairingDevice = device
+                        pairingCode = ""
+                        pairingError = "授权已失效，请输入手机上的新配对码"
+                        message = "请重新配对"
                     }
                 }
                 pairingPhoneId = phoneId

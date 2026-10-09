@@ -180,8 +180,10 @@ class MainActivity : ComponentActivity() {
         folders = folders.map { it.copy(enabled = enabled) }
     }
     private fun revokeDevice(id: String) {
-        PairingStore(this).revoke(id)
-        devices = PairingStore(this).devices().map { ConnectedDevice(it.id, it.name, false) }
+        val store = PairingStore(this)
+        store.revoke(id)
+        pairingCode = store.rotateCode()
+        devices = store.devices().map { ConnectedDevice(it.id, it.name, false) }
     }
     private fun startOrAsk() {
         if (ContextCompat.checkSelfPermission(this, mediaPermission()) != PackageManager.PERMISSION_GRANTED) { permissionRequest.launch(arrayOf(mediaPermission())); return }
