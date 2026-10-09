@@ -3,8 +3,26 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+val signingStorePassword = providers.gradleProperty("SIGNING_STORE_PASSWORD")
+    .orElse(providers.environmentVariable("SIGNING_STORE_PASSWORD"))
+    .orElse("")
+    .get()
+val signingKeyPassword = providers.gradleProperty("SIGNING_KEY_PASSWORD")
+    .orElse(providers.environmentVariable("SIGNING_KEY_PASSWORD"))
+    .orElse("")
+    .get()
+
 android { namespace = "com.phonetv.phone"; compileSdk = 36
-    defaultConfig { applicationId = "com.phonetv.phone"; minSdk = 26; targetSdk = 35; versionCode = 2; versionName = "1.1.9" }
+    defaultConfig { applicationId = "com.phonetv.phone"; minSdk = 26; targetSdk = 35; versionCode = 3; versionName = "1.1.10" }
+    signingConfigs {
+        create("release") {
+            storeFile = rootProject.file("sll_test")
+            storePassword = signingStorePassword
+            keyAlias = "key0"
+            keyPassword = signingKeyPassword
+        }
+    }
+    buildTypes { getByName("release") { signingConfig = signingConfigs.getByName("release") } }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     buildFeatures { compose = true }
 }

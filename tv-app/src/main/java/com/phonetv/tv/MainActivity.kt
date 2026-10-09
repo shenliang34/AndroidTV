@@ -21,6 +21,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -284,24 +287,27 @@ class MainActivity : ComponentActivity() {
             "最旧优先" -> visibleVideos.sortedBy { it.modified }
             else -> visibleVideos.sortedByDescending { it.modified }
         }
-        Column(Modifier.fillMaxSize().screenInsets().padding(horizontal = 56.dp, vertical = 24.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.fillMaxSize().screenInsets().padding(horizontal = 28.dp, vertical = 12.dp)) {
+            Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text(selected?.name ?: "手机媒体库", color = Sub, fontSize = 15.sp)
-                    Text("片库", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+                    Text(selected?.name ?: "手机媒体库", color = Sub, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("片库", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold, lineHeight = 30.sp)
                 }
-                Text("${videos.size} / $serverVideoTotal 部", color = Color(0xFFD0D5DB), fontSize = 15.sp,
-                    modifier = Modifier.clip(RoundedCornerShape(20.dp)).background(Panel).padding(horizontal = 14.dp, vertical = 9.dp))
-                Spacer(Modifier.width(16.dp))
-                BackButton()
+                Box(Modifier.weight(1.2f), contentAlignment = Alignment.Center) {
+                    OutlinedTextField(value = searchText, onValueChange = { searchText = it }, singleLine = true,
+                        placeholder = { Text("搜索片名", fontSize = 14.sp) }, leadingIcon = { Icon(Icons.Default.Search, null, modifier = Modifier.size(20.dp)) },
+                        modifier = Modifier.fillMaxWidth(0.88f).height(52.dp), textStyle = MaterialTheme.typography.bodyMedium,
+                        shape = RoundedCornerShape(14.dp), colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = Color(0xFF333942), focusedBorderColor = Accent))
+                }
+                Row(Modifier.weight(1f), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                    Text("${videos.size} / $serverVideoTotal 部", color = Color(0xFFD0D5DB), fontSize = 15.sp,
+                        modifier = Modifier.clip(RoundedCornerShape(20.dp)).background(Panel).padding(horizontal = 14.dp, vertical = 9.dp))
+                    Spacer(Modifier.width(16.dp))
+                    BackButton()
+                }
             }
-            Spacer(Modifier.height(16.dp))
-            val featured = sortedVideos.firstOrNull()
-            if (browseMode != "文件夹" && searchText.isBlank() && featured != null) {
-                FeaturedVideo(featured, onClick = { requestPlay(featured) })
-                Spacer(Modifier.height(18.dp))
-            }
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Spacer(Modifier.height(10.dp))
+            Row(Modifier.fillMaxWidth().height(44.dp), verticalAlignment = Alignment.CenterVertically) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf("全部视频", "最近添加", "文件夹").forEach { mode ->
                         BrowseChip(mode, selected = browseMode == mode) { browseMode = mode; folder = if (mode == "文件夹") folder else null }
@@ -317,18 +323,15 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                Spacer(Modifier.width(12.dp))
-                OutlinedTextField(value = searchText, onValueChange = { searchText = it }, singleLine = true,
-                    placeholder = { Text("搜索片名", fontSize = 14.sp) }, leadingIcon = { Icon(Icons.Default.Search, null, modifier = Modifier.size(20.dp)) },
-                    modifier = Modifier.width(280.dp).height(54.dp), textStyle = MaterialTheme.typography.bodyMedium,
-                    shape = RoundedCornerShape(14.dp), colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = Color(0xFF333942), focusedBorderColor = Accent))
             }
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(8.dp))
             if (groups.isEmpty()) {
                 EmptyLibrary(message)
             } else if (browseMode == "文件夹") {
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    items(groups.toList(), key = { it.key }) { (name, items) ->
+                LazyVerticalGrid(columns = GridCells.Adaptive(minSize = 220.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp),
+                    modifier = Modifier.weight(1f), contentPadding = PaddingValues(bottom = 10.dp)) {
+                    gridItems(groups.toList(), key = { it.key }) { (name, items) ->
                         FolderCard(name, items.size) { folder = name }
                     }
                 }
@@ -336,13 +339,15 @@ class MainActivity : ComponentActivity() {
                 EmptyLibrary("没有找到匹配的视频，换个片名或清除搜索条件试试。")
             } else {
                 val list = if (browseMode == "最近添加") sortedVideos.take(30) else sortedVideos
-                Row(Modifier.fillMaxWidth().padding(bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().height(30.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(if (browseMode == "最近添加") "最近添加" else "所有视频", color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.width(10.dp))
                     Text("${list.size} 部", color = Sub, fontSize = 14.sp)
                 }
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxWidth()) {
-                    items(list, key = { it.id }) { video -> PosterCard(video, onFocus = {}, onClick = { requestPlay(video) }) }
+                LazyVerticalGrid(columns = GridCells.Adaptive(minSize = 220.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.weight(1f), contentPadding = PaddingValues(bottom = 10.dp)) {
+                    gridItems(list, key = { it.id }) { video -> PosterCard(video, onFocus = {}, onClick = { requestPlay(video) }, fillCell = true) }
                 }
             }
         }
@@ -398,7 +403,7 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun FolderCard(name: String, count: Int, onClick: () -> Unit) {
         var focused by remember { mutableStateOf(false) }
-        Column(Modifier.width(190.dp).height(148.dp).clip(RoundedCornerShape(18.dp)).background(if (focused) Color(0xFF30251C) else Panel)
+        Column(Modifier.fillMaxWidth().height(148.dp).clip(RoundedCornerShape(18.dp)).background(if (focused) Color(0xFF30251C) else Panel)
             .border(if (focused) 3.dp else 1.dp, if (focused) Accent else Color(0xFF2A3038), RoundedCornerShape(18.dp))
             .onFocusChanged { focused = it.isFocused }.focusable().clickable(onClick = onClick).padding(18.dp),
             horizontalAlignment = Alignment.Start, verticalArrangement = Arrangement.Center) {
@@ -426,9 +431,10 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun PosterCard(video: RemoteVideo, onFocus: () -> Unit, onClick: () -> Unit) {
+    private fun PosterCard(video: RemoteVideo, onFocus: () -> Unit, onClick: () -> Unit, fillCell: Boolean = false) {
         var focused by remember { mutableStateOf(false) }
-        Column(Modifier.width(228.dp).scale(if (focused) 1.04f else 1f)
+        val tileWidth = if (fillCell) Modifier.fillMaxWidth() else Modifier.width(228.dp)
+        Column(tileWidth.scale(if (focused) 1.04f else 1f)
             .onFocusChanged { focused = it.isFocused; if (it.isFocused) onFocus() }.focusable().clickable(onClick = onClick)) {
             Box(Modifier.fillMaxWidth().height(128.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xFF1C2026))
                 .border(if (focused) 3.dp else 1.dp, if (focused) Accent else Color(0xFF30353D), RoundedCornerShape(14.dp))) {
