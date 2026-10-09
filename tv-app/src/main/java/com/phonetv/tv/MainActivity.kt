@@ -566,7 +566,11 @@ class MainActivity : ComponentActivity() {
                 }
             )
         }) {
-            AndroidView(factory = { ctx -> PlayerView(ctx).apply { this.player = exo; useController = false } }, modifier = Modifier.fillMaxSize())
+            AndroidView(
+                factory = { ctx -> PlayerView(ctx).apply { useController = false } },
+                update = { view -> view.player = exo },
+                modifier = Modifier.fillMaxSize()
+            )
             AnimatedVisibility(
                 visible = controls,
                 modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
