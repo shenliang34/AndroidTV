@@ -65,16 +65,45 @@ class LanHttpServer(private val context: Context, private val catalog: MediaCata
         }
         val out = BufferedOutputStream(socket.getOutputStream())
         try {
+            if (path == "/api/pair/request") {
+                if (method != "POST") return respond(out, 405, "text/plain", ByteArray(0), mapOf("Allow" to "POST"), head = true)
+                if (contentLength !in 1..4096) return respond(out, 400, "text/plain", ByteArray(0), head = true)
+                val body = readBody(input, contentLength, out) ?: return
+                val address = socket.inetAddress.hostAddress ?: "unknown"
+                if (isPairingRateLimited(address)) return respond(out, 429, "application/json", JSONObject().put("error", "too_many_requests").toString().toByteArray(), mapOf("Retry-After" to "600"))
+                val request = try { JSONObject(String(body, Charsets.UTF_8)) } catch (_: Exception) { null }
+                val tvId = request?.optString("deviceId", "") ?: ""
+                val tvName = request?.optString("deviceName", "") ?: ""
+                val pairingRequest = pairing.requestPairing(tvId, tvName)
+                    ?: return respond(out, 400, "application/json", JSONObject().put("error", "invalid_pairing_request").toString().toByteArray())
+                return respond(out, 200, "application/json", JSONObject()
+                    .put("requestId", pairingRequest.requestId)
+                    .put("expiresAt", pairingRequest.expiresAt)
+                    .toString().toByteArray())
+            }
+            if (path == "/api/pair/status") {
+                if (method != "GET") return respond(out, 405, "text/plain", ByteArray(0), mapOf("Allow" to "GET"), head = true)
+                val requestId = queryParameter(parts[1], "requestId")
+                if (requestId.isNullOrBlank() || requestId.length > 64) return respond(out, 400, "application/json", ByteArray(0))
+                val result = pairing.requestStatus(requestId)
+                return respond(out, 200, "application/json", JSONObject()
+                    .put("status", result.status)
+                    .apply { result.token?.let { put("token", it) } }
+                    .toString().toByteArray())
+            }
+            if (path == "/api/pair/cancel" || path == "/api/pair/complete") {
+                if (method != "POST") return respond(out, 405, "text/plain", ByteArray(0), mapOf("Allow" to "POST"), head = true)
+                if (contentLength !in 1..4096) return respond(out, 400, "text/plain", ByteArray(0), head = true)
+                val body = readBody(input, contentLength, out) ?: return
+                val requestId = try { JSONObject(String(body, Charsets.UTF_8)).optString("requestId") } catch (_: Exception) { "" }
+                if (requestId.isBlank() || requestId.length > 64) return respond(out, 400, "application/json", ByteArray(0))
+                if (path == "/api/pair/cancel") pairing.cancelRequest(requestId) else pairing.completeRequest(requestId)
+                return respond(out, 200, "application/json", JSONObject().put("ok", true).toString().toByteArray())
+            }
             if (path == "/api/pair") {
                 if (method != "POST") return respond(out, 405, "text/plain", ByteArray(0), mapOf("Allow" to "POST"), head = true)
                 if (contentLength !in 1..4096) return respond(out, 400, "text/plain", ByteArray(0), head = true)
-                val body = ByteArray(contentLength)
-                var offset = 0
-                while (offset < body.size) {
-                    val count = input.read(body, offset, body.size - offset)
-                    if (count < 0) return respond(out, 400, "text/plain", ByteArray(0), head = true)
-                    offset += count
-                }
+                val body = readBody(input, contentLength, out) ?: return
                 val address = socket.inetAddress.hostAddress ?: "unknown"
                 if (isPairingRateLimited(address)) return respond(out, 429, "text/plain", ByteArray(0), mapOf("Retry-After" to "600"), head = true)
                 val request = try { JSONObject(String(body, Charsets.UTF_8)) } catch (_: Exception) { null }
@@ -161,6 +190,26 @@ class LanHttpServer(private val context: Context, private val catalog: MediaCata
             false
         } else attempt.failures >= MAX_PAIR_FAILURES
     }
+
+    private fun readBody(input: BufferedInputStream, length: Int, out: BufferedOutputStream): ByteArray? {
+        val body = ByteArray(length)
+        var offset = 0
+        while (offset < body.size) {
+            val count = input.read(body, offset, body.size - offset)
+            if (count < 0) {
+                respond(out, 400, "text/plain", ByteArray(0), head = true)
+                return null
+            }
+            offset += count
+        }
+        return body
+    }
+
+    private fun queryParameter(target: String, name: String): String? = target.substringAfter('?', "")
+        .split('&').firstNotNullOfOrNull { parameter ->
+            val pair = parameter.split('=', limit = 2)
+            if (pair.size == 2 && pair[0] == name) URLDecoder.decode(pair[1], "UTF-8") else null
+        }
 
     private fun recordPairingFailure(address: String) = synchronized(pairAttempts) {
         val now = System.currentTimeMillis()

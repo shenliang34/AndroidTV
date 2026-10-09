@@ -34,6 +34,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
     private val catalog by lazy { MediaCatalog(this) }
@@ -41,7 +42,7 @@ class MainActivity : ComponentActivity() {
     private var folders by mutableStateOf(listOf<FolderShare>())
     private var devices by mutableStateOf(listOf<ConnectedDevice>())
     private var menu by mutableStateOf(false)
-    private var pairingCode by mutableStateOf<String?>(null)
+    private var pendingPairing by mutableStateOf<PendingTvPairing?>(null)
     private var mediaPermissionGranted by mutableStateOf(false)
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { refresh() }
 
@@ -60,6 +61,14 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun ShareScreen() {
+        LaunchedEffect(sharing) {
+            if (!sharing) { pendingPairing = null; return@LaunchedEffect }
+            val store = PairingStore(this@MainActivity)
+            while (true) {
+                pendingPairing = store.pendingRequests().firstOrNull()
+                delay(700)
+            }
+        }
         val enabledCount = folders.count { it.enabled }
         val allOn = folders.isNotEmpty() && folders.all { it.enabled }
         val videoCount = folders.sumOf { it.count }
@@ -73,29 +82,10 @@ class MainActivity : ComponentActivity() {
                     IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "更多", tint = Color.White) }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         DropdownMenuItem(text = { Text("重新扫描") }, onClick = { menu = false; refresh() })
-                        if (sharing) DropdownMenuItem(text = { Text("刷新配对码") }, onClick = { menu = false; pairingCode = PairingStore(this@MainActivity).rotateCode() })
                     }
                 }
             }
             Spacer(Modifier.height(18.dp))
-            Box(Modifier.fillMaxWidth().height(190.dp).clip(RoundedCornerShape(24.dp))
-                .background(Brush.linearGradient(listOf(Color(0xFF34271E), Color(0xFF1D1A1A), Color(0xFF17171B))))
-                .border(1.dp, Color(0xFF41352B), RoundedCornerShape(24.dp))) {
-                Box(Modifier.align(Alignment.CenterEnd).offset(x = 34.dp).size(180.dp).clip(RoundedCornerShape(48.dp))
-                    .background(Brush.linearGradient(listOf(Color(0xFF6E4A2A), Color(0xFF33251C)))))
-                Box(Modifier.align(Alignment.CenterEnd).padding(end = 48.dp).size(82.dp).clip(RoundedCornerShape(26.dp))
-                    .background(Color(0xFF211B17)).border(1.dp, Accent.copy(alpha = 0.45f), RoundedCornerShape(26.dp)), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.Tv, null, tint = Accent, modifier = Modifier.size(38.dp))
-                }
-                Column(Modifier.align(Alignment.CenterStart).padding(start = 22.dp, end = 138.dp)) {
-                    Text("YOUR PRIVATE CINEMA", color = Accent, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.6.sp)
-                    Spacer(Modifier.height(10.dp))
-                    Text("今晚，接着看。", color = Color.White, fontSize = 24.sp, lineHeight = 30.sp, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(5.dp))
-                    Text("把手机里的影片，带到电视大屏。", color = Color(0xFFBEB5AC), fontSize = 12.sp, maxLines = 2)
-                }
-            }
-            Spacer(Modifier.height(14.dp))
             CardBlock {
                 Column(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(Color(0xFF30251C), Color(0xFF1B1A1D)))).padding(18.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -127,11 +117,11 @@ class MainActivity : ComponentActivity() {
                 if (sharing) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text("电视配对码", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                            Text("电视连接确认", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                             Spacer(Modifier.height(3.dp))
-                            Text("5 分钟有效 · 配对后立即失效", color = Subtitle, fontSize = 12.sp)
+                            Text("电视发起配对后，请在手机上确认", color = Subtitle, fontSize = 12.sp)
                         }
-                        Text(pairingCode ?: "------", color = Accent, fontSize = 25.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp,
+                        Text("免配对码", color = Accent, fontSize = 15.sp, fontWeight = FontWeight.Bold,
                             modifier = Modifier.clip(RoundedCornerShape(12.dp)).background(Color(0xFF111719)).padding(horizontal = 14.dp, vertical = 9.dp))
                     }
                 }
@@ -179,7 +169,7 @@ class MainActivity : ComponentActivity() {
                         Spacer(Modifier.width(13.dp))
                         Column {
                             Text("还没有授权电视", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                            Text("电视输入上方配对码后会显示在这里。", color = Subtitle, fontSize = 12.sp)
+                            Text("电视发起配对后会显示在这里。", color = Subtitle, fontSize = 12.sp)
                         }
                     }
                 } else devices.forEachIndexed { index, device ->
@@ -200,6 +190,15 @@ class MainActivity : ComponentActivity() {
                 }
             }
             Spacer(Modifier.height(26.dp))
+        }
+        pendingPairing?.let { request ->
+            AlertDialog(
+                onDismissRequest = { rejectPairing(request) },
+                title = { Text("允许电视连接？") },
+                text = { Text("${request.tvName} 正在请求访问手机共享的视频。请确认这是你发起的连接。") },
+                confirmButton = { TextButton(onClick = { approvePairing(request) }) { Text("允许") } },
+                dismissButton = { TextButton(onClick = { rejectPairing(request) }) { Text("拒绝") } }
+            )
         }
     }
 
@@ -232,7 +231,6 @@ class MainActivity : ComponentActivity() {
         sharing = MediaServerServiceState.running
         val pairing = PairingStore(this)
         devices = pairing.devices().map { ConnectedDevice(it.id, it.name, false) }
-        pairingCode = if (sharing) pairing.activeCode() else null
     }
     private fun setFolder(name: String, enabled: Boolean) {
         val disabled = (prefs().getStringSet("disabledFolders", emptySet()) ?: emptySet()).toMutableSet()
@@ -248,19 +246,27 @@ class MainActivity : ComponentActivity() {
     private fun revokeDevice(id: String) {
         val store = PairingStore(this)
         store.revoke(id)
-        pairingCode = store.rotateCode()
         devices = store.devices().map { ConnectedDevice(it.id, it.name, false) }
     }
     private fun startOrAsk() {
         if (ContextCompat.checkSelfPermission(this, mediaPermission()) != PackageManager.PERMISSION_GRANTED) { permissionRequest.launch(arrayOf(mediaPermission())); return }
         catalog.scan()
-        pairingCode = PairingStore(this).rotateCode()
+        PairingStore(this).invalidateCode()
         MediaServerServiceState.running = true
         ContextCompat.startForegroundService(this, Intent(this, MediaServerService::class.java))
         sharing = true
         refresh()
     }
-    private fun stopSharing() { stopService(Intent(this, MediaServerService::class.java)); MediaServerServiceState.running = false; PairingStore(this).invalidateCode(); pairingCode = null; sharing = false }
+    private fun stopSharing() { stopService(Intent(this, MediaServerService::class.java)); MediaServerServiceState.running = false; PairingStore(this).invalidateCode(); sharing = false }
+    private fun approvePairing(request: PendingTvPairing) {
+        PairingStore(this).approveRequest(request.requestId)
+        pendingPairing = null
+        refresh()
+    }
+    private fun rejectPairing(request: PendingTvPairing) {
+        PairingStore(this).rejectRequest(request.requestId)
+        pendingPairing = null
+    }
 }
 
 data class FolderShare(val name: String, val count: Int, val enabled: Boolean)

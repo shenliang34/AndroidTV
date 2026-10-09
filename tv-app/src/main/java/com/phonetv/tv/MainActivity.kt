@@ -42,6 +42,12 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.material3.Slider
 import androidx.compose.runtime.*
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.tween
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -66,7 +72,11 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MediaItem
+import androidx.media3.common.C
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -75,6 +85,7 @@ import androidx.media3.ui.PlayerView
 import coil.ImageLoader
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -95,7 +106,8 @@ class MainActivity : ComponentActivity() {
     private var selected by mutableStateOf<PhoneDevice?>(null)
     private var pairingDevice by mutableStateOf<PhoneDevice?>(null)
     private var pairingPhoneId by mutableStateOf<String?>(null)
-    private var pairingCode by mutableStateOf("")
+    private var pairingRequestId by mutableStateOf<String?>(null)
+    private var pairingJob: Job? = null
     private var pairingError by mutableStateOf<String?>(null)
     private var authToken by mutableStateOf<String?>(null)
     private var serverVideoTotal by mutableIntStateOf(0)
@@ -109,6 +121,7 @@ class MainActivity : ComponentActivity() {
     private var isBuffering by mutableStateOf(false)
     private var playing by mutableStateOf<RemoteVideo?>(null)
     private var message by mutableStateOf("正在搜索手机…")
+    private var showNetworkSpeed by mutableStateOf(false)
     private var nsd: NsdManager? = null
     private var discovery: NsdManager.DiscoveryListener? = null
     private var player: ExoPlayer? = null
@@ -134,6 +147,7 @@ class MainActivity : ComponentActivity() {
             window.attributes = window.attributes.apply { layoutInDisplayCutoutMode = android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES }
         }
         startDiscovery()
+        showNetworkSpeed = getSharedPreferences("player", MODE_PRIVATE).getBoolean("showNetworkSpeed", false)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(background = Bg, primary = Accent)) {
                 Surface(Modifier.fillMaxSize(), color = Bg) {
@@ -157,22 +171,14 @@ class MainActivity : ComponentActivity() {
                     if (deviceToPair != null) {
                         AlertDialog(
                             onDismissRequest = { dismissPairing() },
-                            title = { Text("重新配对 ${deviceToPair.name}") },
+                            title = { Text("等待手机确认") },
                             text = {
                                 Column {
-                                    Text("手机已撤销授权或配对已失效。请查看手机上新的 6 位配对码。")
-                                    Spacer(Modifier.height(12.dp))
-                                    OutlinedTextField(
-                                        value = pairingCode,
-                                        onValueChange = { pairingCode = it.filter(Char::isDigit).take(6); pairingError = null },
-                                        label = { Text("配对码") },
-                                        singleLine = true,
-                                        isError = pairingError != null
-                                    )
+                                    Text("${deviceToPair.name} 已向手机发送连接请求。请在手机上选择允许。")
                                     pairingError?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp) }
                                 }
                             },
-                            confirmButton = { TextButton(enabled = pairingCode.length == 6, onClick = { pairAndConnect(deviceToPair, pairingPhoneId, pairingCode) }) { Text("配对") } },
+                            confirmButton = { TextButton(onClick = {}) { Text("等待确认…") } },
                             dismissButton = { TextButton(onClick = { dismissPairing() }) { Text("取消") } }
                         )
                     }
@@ -302,7 +308,14 @@ class MainActivity : ComponentActivity() {
                 Row(Modifier.weight(1f), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
                     Text("${videos.size} / $serverVideoTotal 部", color = Color(0xFFD0D5DB), fontSize = 15.sp,
                         modifier = Modifier.clip(RoundedCornerShape(20.dp)).background(Panel).padding(horizontal = 14.dp, vertical = 9.dp))
-                    Spacer(Modifier.width(16.dp))
+                    Row(Modifier.padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("网速", color = Sub, fontSize = 13.sp)
+                        Switch(checked = showNetworkSpeed, onCheckedChange = {
+                            showNetworkSpeed = it
+                            getSharedPreferences("player", MODE_PRIVATE).edit().putBoolean("showNetworkSpeed", it).apply()
+                        }, modifier = Modifier.scale(0.78f))
+                    }
+                    Spacer(Modifier.width(4.dp))
                     BackButton()
                 }
             }
@@ -465,6 +478,7 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
+    @OptIn(UnstableApi::class)
     private fun PlayerScreen(video: RemoteVideo) {
         val exo = player
         var position by remember { mutableLongStateOf(0L) }
@@ -476,6 +490,9 @@ class MainActivity : ComponentActivity() {
         var tick by remember { mutableIntStateOf(0) }
         var draggingProgress by remember { mutableStateOf(false) }
         var sliderPosition by remember(video.id) { mutableFloatStateOf(0f) }
+        var trackGroups by remember(exo) { mutableStateOf(exo?.currentTracks?.groups.orEmpty()) }
+        var audioMenuExpanded by remember { mutableStateOf(false) }
+        var subtitleMenuExpanded by remember { mutableStateOf(false) }
         val siblings = videos.filter { it.folder == video.folder }
         val focusRequester = remember { FocusRequester() }
         val rates = listOf(0.75f, 1f, 1.25f, 1.5f, 2f)
@@ -507,6 +524,7 @@ class MainActivity : ComponentActivity() {
                 duration = exo?.duration?.takeIf { it > 0 } ?: video.duration
                 playingNow = exo?.isPlaying == true
                 isBuffering = exo?.playbackState == Player.STATE_BUFFERING
+                trackGroups = exo?.currentTracks?.groups.orEmpty()
                 if (!draggingProgress && duration > 0) sliderPosition = position.toFloat() / duration
                 val bps = bandwidthMeter?.bitrateEstimate ?: 0L
                 speedText = if (bps > 0) "%.2f Mbps".format(bps / 1_000_000.0) else "--"
@@ -521,9 +539,11 @@ class MainActivity : ComponentActivity() {
         LaunchedEffect(Unit) { focusRequester.requestFocus() }
         Box(Modifier.fillMaxSize().background(Color.Black).focusRequester(focusRequester).focusable().onPreviewKeyEvent { event ->
             if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+            val repeatCount = event.nativeKeyEvent.repeatCount.coerceAtLeast(0)
+            val seekStep = (10_000L * (1 + repeatCount / 3)).coerceAtMost(60_000L)
             when (event.nativeKeyEvent.keyCode) {
-                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_MEDIA_REWIND -> { seekBy(-10_000); true }
-                KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { seekBy(10_000); true }
+                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_MEDIA_REWIND -> { seekBy(-seekStep); true }
+                KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { seekBy(seekStep); true }
                 KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE -> {
                     if (!controls) showControls() else togglePlay()
                     true
@@ -547,7 +567,13 @@ class MainActivity : ComponentActivity() {
             )
         }) {
             AndroidView(factory = { ctx -> PlayerView(ctx).apply { this.player = exo; useController = false } }, modifier = Modifier.fillMaxSize())
-            if (controls) Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Color(0xCC000000)).padding(horizontal = 12.dp, vertical = 10.dp)) {
+            AnimatedVisibility(
+                visible = controls,
+                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+                enter = fadeIn(tween(240)) + slideInVertically(tween(240)) { it / 12 },
+                exit = fadeOut(tween(220)) + slideOutVertically(tween(220)) { it / 14 }
+            ) {
+                Column(Modifier.fillMaxWidth().background(Color(0x66000000)).padding(horizontal = 12.dp, vertical = 10.dp)) {
                 if (siblings.size > 1) {
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
                         items(siblings, key = { it.id }) { item ->
@@ -556,19 +582,14 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+                Row(Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 1.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("${formatClock(position)} / ${formatClock(duration)}", color = Color.White, fontSize = 12.sp,
+                        modifier = Modifier.weight(1f))
+                    if (showNetworkSpeed) Text(speedText, color = Color.White, fontSize = 12.sp)
+                }
                 Slider(value = sliderPosition.coerceIn(0f, 1f), onValueChange = { draggingProgress = true; sliderPosition = it },
                     onValueChangeFinished = { exo?.seekTo((sliderPosition * duration).toLong()); draggingProgress = false },
                     modifier = Modifier.fillMaxWidth().height(28.dp))
-                Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(video.name.substringBefore('.'), color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                    Text("${formatClock(position)} / ${formatClock(duration)}", color = Color.White, fontSize = 12.sp)
-                    Spacer(Modifier.width(10.dp))
-                    Text(speedText, color = Color.White, fontSize = 12.sp)
-                }
-                if (isBuffering || playbackError != null) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                    Text(playbackError ?: "正在缓冲…", color = if (playbackError != null) Color(0xFFFF8A80) else Color.White)
-                    if (playbackError != null) { TextButton(onClick = { startVideo(video, position) }) { Text("重试") }; TextButton(onClick = { goBack() }) { Text("返回") } }
-                }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                     RoundButton(Icons.Default.SkipPrevious) { playSibling(video, -1); tick++ }
                     Spacer(Modifier.width(10.dp))
@@ -584,6 +605,92 @@ class MainActivity : ComponentActivity() {
                         .border(1.dp, Color(0x88FFFFFF), RoundedCornerShape(18.dp)).clickable { cycleRate() }.focusable(),
                         contentAlignment = Alignment.Center) {
                         Text(if (rate == 1f) "1.0x" else "${rate}x", color = Color.White, fontSize = 16.sp)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Box {
+                        TextButton(onClick = { subtitleMenuExpanded = true }) { Text("字幕", color = Color.White) }
+                        DropdownMenu(expanded = subtitleMenuExpanded, onDismissRequest = { subtitleMenuExpanded = false }) {
+                            DropdownMenuItem(text = { Text("自动") }, onClick = {
+                                exo?.trackSelectionParameters = exo?.trackSelectionParameters?.buildUpon()
+                                    ?.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                                    ?.clearOverridesOfType(C.TRACK_TYPE_TEXT)?.build() ?: return@DropdownMenuItem
+                                subtitleMenuExpanded = false
+                            })
+                            DropdownMenuItem(text = { Text("关闭字幕") }, onClick = {
+                                exo?.trackSelectionParameters = exo?.trackSelectionParameters?.buildUpon()
+                                    ?.clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                                    ?.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)?.build() ?: return@DropdownMenuItem
+                                subtitleMenuExpanded = false
+                            })
+                            trackGroups.filter { it.type == C.TRACK_TYPE_TEXT }.forEachIndexed { groupIndex, group ->
+                                repeat(group.length) { trackIndex ->
+                                    if (group.isTrackSupported(trackIndex)) {
+                                        val format = group.getTrackFormat(trackIndex)
+                                        val label = listOfNotNull(format.label, format.language?.takeUnless { it == "und" })
+                                            .distinct().joinToString(" · ").ifBlank { "字幕 ${groupIndex + 1}.${trackIndex + 1}" }
+                                        DropdownMenuItem(text = { Text(label) }, onClick = {
+                                            exo?.trackSelectionParameters = exo?.trackSelectionParameters?.buildUpon()
+                                                ?.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                                                ?.setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, listOf(trackIndex)))
+                                                ?.build() ?: return@DropdownMenuItem
+                                            subtitleMenuExpanded = false
+                                        }, trailingIcon = { if (group.isTrackSelected(trackIndex)) Text("✓") })
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Box {
+                        TextButton(onClick = { audioMenuExpanded = true }) { Text("音轨", color = Color.White) }
+                        DropdownMenu(expanded = audioMenuExpanded, onDismissRequest = { audioMenuExpanded = false }) {
+                            DropdownMenuItem(text = { Text("自动") }, onClick = {
+                                exo?.trackSelectionParameters = exo?.trackSelectionParameters?.buildUpon()
+                                    ?.setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+                                    ?.clearOverridesOfType(C.TRACK_TYPE_AUDIO)?.build() ?: return@DropdownMenuItem
+                                audioMenuExpanded = false
+                            })
+                            trackGroups.filter { it.type == C.TRACK_TYPE_AUDIO }.forEachIndexed { groupIndex, group ->
+                                repeat(group.length) { trackIndex ->
+                                    if (group.isTrackSupported(trackIndex)) {
+                                        val format = group.getTrackFormat(trackIndex)
+                                        val label = listOfNotNull(format.label, format.language?.takeUnless { it == "und" })
+                                            .distinct().joinToString(" · ").ifBlank { "音轨 ${groupIndex + 1}.${trackIndex + 1}" }
+                                        DropdownMenuItem(text = { Text(label) }, onClick = {
+                                            exo?.trackSelectionParameters = exo?.trackSelectionParameters?.buildUpon()
+                                                ?.setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+                                                ?.setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, listOf(trackIndex)))
+                                                ?.build() ?: return@DropdownMenuItem
+                                            audioMenuExpanded = false
+                                        }, trailingIcon = { if (group.isTrackSelected(trackIndex)) Text("✓") })
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                }
+            }
+            AnimatedVisibility(
+                visible = controls,
+                modifier = Modifier.align(Alignment.TopStart).padding(start = 28.dp, top = 24.dp, end = 28.dp),
+                enter = fadeIn(tween(240)), exit = fadeOut(tween(220))
+            ) {
+                Text(video.name.substringBeforeLast('.'), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth(0.72f))
+            }
+            AnimatedVisibility(
+                visible = isBuffering || playbackError != null,
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = 24.dp, end = 28.dp),
+                enter = fadeIn(tween(180)), exit = fadeOut(tween(180))
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.clip(RoundedCornerShape(18.dp)).background(Color(0x66000000)).padding(horizontal = 14.dp, vertical = 8.dp)) {
+                    if (isBuffering && playbackError == null) CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Accent, strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text(playbackError ?: "正在缓冲…", color = if (playbackError != null) Color(0xFFFF8A80) else Color.White, fontSize = 14.sp)
+                    if (playbackError != null) {
+                        TextButton(onClick = { startVideo(video, position) }) { Text("重试") }
+                        TextButton(onClick = { goBack() }) { Text("返回") }
                     }
                 }
             }
@@ -697,44 +804,59 @@ class MainActivity : ComponentActivity() {
                         authToken = null
                         pairingPhoneId = phoneId
                         pairingDevice = device
-                        pairingCode = ""
-                        pairingError = "授权已失效，请输入手机上的新配对码"
-                        message = "请重新配对"
+                        message = "等待手机确认"
                     }
                 }
                 pairingPhoneId = phoneId
                 pairingDevice = device
-                pairingCode = ""
                 pairingError = null
-                message = "请输入手机上的配对码"
+                message = "等待手机确认"
+                requestPhoneApproval(device, phoneId)
             } catch (_: Exception) { message = "无法连接手机，请确认手机共享已开启" }
         }
     }
 
-    private fun pairAndConnect(device: PhoneDevice, phoneId: String?, code: String) {
+    private fun requestPhoneApproval(device: PhoneDevice, phoneId: String?) {
         if (phoneId.isNullOrBlank()) {
             pairingError = "手机信息无效，请返回重新连接"
             return
         }
         pairingError = null
-        lifecycleScope.launch {
+        pairingJob = lifecycleScope.launch {
             try {
-                val token = withContext(Dispatchers.IO) {
+                val requestId = withContext(Dispatchers.IO) {
                     val body = JSONObject()
-                        .put("code", code)
                         .put("deviceId", tvDeviceId())
                         .put("deviceName", android.os.Build.MODEL.ifBlank { "Android TV" })
                         .toString()
-                    requestJson(URL("http://${device.host}:${device.port}/api/pair"), method = "POST", body = body).getString("token")
+                    requestJson(URL("http://${device.host}:${device.port}/api/pair/request"), method = "POST", body = body).getString("requestId")
                 }
-                getSharedPreferences("pairing", MODE_PRIVATE).edit().putString("token_$phoneId", token).apply()
-                val catalog = withContext(Dispatchers.IO) { loadVideos(device, token) }
-                pairingDevice = null
-                pairingPhoneId = null
-                pairingCode = ""
-                completeConnection(device, token, catalog)
+                pairingRequestId = requestId
+                while (true) {
+                    delay(1400)
+                    val status = withContext(Dispatchers.IO) { requestJson(URL("http://${device.host}:${device.port}/api/pair/status?requestId=$requestId")) }
+                    when (status.optString("status")) {
+                        "pending" -> Unit
+                        "approved" -> {
+                            val token = status.optString("token").takeIf { it.isNotBlank() } ?: error("授权结果无效")
+                            getSharedPreferences("pairing", MODE_PRIVATE).edit().putString("token_$phoneId", token).apply()
+                            val catalog = withContext(Dispatchers.IO) {
+                                val loaded = loadVideos(device, token)
+                                requestJson(URL("http://${device.host}:${device.port}/api/pair/complete"), method = "POST", body = JSONObject().put("requestId", requestId).toString())
+                                loaded
+                            }
+                            pairingDevice = null
+                            pairingPhoneId = null
+                            pairingRequestId = null
+                            completeConnection(device, token, catalog)
+                            return@launch
+                        }
+                        "rejected" -> { pairingError = "手机拒绝了本次连接请求。"; return@launch }
+                        else -> { pairingError = "配对请求已过期，请重新连接手机。"; return@launch }
+                    }
+                }
             } catch (error: HttpStatusException) {
-                pairingError = if (error.statusCode == 401) "配对码错误、已过期或已使用，请检查手机上的新配对码。" else "配对失败（HTTP ${error.statusCode}）"
+                pairingError = "配对请求失败（HTTP ${error.statusCode}）"
             } catch (_: Exception) {
                 pairingError = "连接失败，请确认两台设备在同一网络且手机共享已开启。"
             }
@@ -742,9 +864,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun dismissPairing() {
+        pairingJob?.cancel()
+        pairingJob = null
+        val id = pairingRequestId
+        val device = pairingDevice
+        if (id != null && device != null) lifecycleScope.launch(Dispatchers.IO) {
+            try { requestJson(URL("http://${device.host}:${device.port}/api/pair/cancel"), method = "POST", body = JSONObject().put("requestId", id).toString()) } catch (_: Exception) {}
+        }
         pairingDevice = null
         pairingPhoneId = null
-        pairingCode = ""
+        pairingRequestId = null
         pairingError = null
     }
 
