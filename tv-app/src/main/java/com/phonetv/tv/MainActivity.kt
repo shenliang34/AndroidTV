@@ -110,7 +110,6 @@ class MainActivity : ComponentActivity() {
     private var pairingJob: Job? = null
     private var pairingError by mutableStateOf<String?>(null)
     private var authToken by mutableStateOf<String?>(null)
-    private var serverVideoTotal by mutableIntStateOf(0)
     private var folder by mutableStateOf<String?>(null)
     private var browseMode by mutableStateOf("全部视频")
     private var searchText by mutableStateOf("")
@@ -293,11 +292,22 @@ class MainActivity : ComponentActivity() {
             "最旧优先" -> visibleVideos.sortedBy { it.modified }
             else -> visibleVideos.sortedByDescending { it.modified }
         }
+        val currentSection = when (browseMode) {
+            "最近添加" -> "最近添加"
+            "文件夹" -> "文件夹"
+            else -> "所有视频"
+        }
+        val currentVideoCount = when (browseMode) {
+            "最近添加" -> sortedVideos.size.coerceAtMost(30)
+            "文件夹" -> null
+            else -> sortedVideos.size
+        }
         Column(Modifier.fillMaxSize().screenInsets().padding(horizontal = 28.dp, vertical = 12.dp)) {
             Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(selected?.name ?: "手机媒体库", color = Sub, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text("片库", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold, lineHeight = 30.sp)
+                Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                    Text("片库", color = Color.White, fontSize = 25.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                    Text("/ $currentSection${currentVideoCount?.let { " ${it}部" } ?: ""}", color = Color.White, fontSize = 21.sp,
+                        fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 Box(Modifier.weight(1.2f), contentAlignment = Alignment.Center) {
                     OutlinedTextField(value = searchText, onValueChange = { searchText = it }, singleLine = true,
@@ -306,16 +316,6 @@ class MainActivity : ComponentActivity() {
                         shape = RoundedCornerShape(14.dp), colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = Color(0xFF333942), focusedBorderColor = Accent))
                 }
                 Row(Modifier.weight(1f), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-                    Text("${videos.size} / $serverVideoTotal 部", color = Color(0xFFD0D5DB), fontSize = 15.sp,
-                        modifier = Modifier.clip(RoundedCornerShape(20.dp)).background(Panel).padding(horizontal = 14.dp, vertical = 9.dp))
-                    Row(Modifier.padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("网速", color = Sub, fontSize = 13.sp)
-                        Switch(checked = showNetworkSpeed, onCheckedChange = {
-                            showNetworkSpeed = it
-                            getSharedPreferences("player", MODE_PRIVATE).edit().putBoolean("showNetworkSpeed", it).apply()
-                        }, modifier = Modifier.scale(0.78f))
-                    }
-                    Spacer(Modifier.width(4.dp))
                     BackButton()
                 }
             }
@@ -352,11 +352,6 @@ class MainActivity : ComponentActivity() {
                 EmptyLibrary("没有找到匹配的视频，换个片名或清除搜索条件试试。")
             } else {
                 val list = if (browseMode == "最近添加") sortedVideos.take(30) else sortedVideos
-                Row(Modifier.fillMaxWidth().height(30.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (browseMode == "最近添加") "最近添加" else "所有视频", color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.width(10.dp))
-                    Text("${list.size} 部", color = Sub, fontSize = 14.sp)
-                }
                 LazyVerticalGrid(columns = GridCells.Adaptive(minSize = 220.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp),
                     modifier = Modifier.weight(1f), contentPadding = PaddingValues(bottom = 10.dp)) {
@@ -932,7 +927,6 @@ class MainActivity : ComponentActivity() {
         authToken = token
         videos.clear()
         videos.addAll(catalog.videos)
-        serverVideoTotal = catalog.total
         selected = device
         message = if (catalog.total == 0) "手机上没有可共享的视频" else "已加载 ${videos.size} / ${catalog.total} 个视频"
     }

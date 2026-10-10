@@ -24,15 +24,24 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Restore signing keystore
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+        run: |
+          echo "$SIGNING_KEYSTORE_BASE64" | base64 --decode > sll_test
+
       - name: Build Android APKs
-        run: ./gradlew :phone-app:assembleDebug :tv-app:assembleDebug
+        env:
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: ./gradlew :phone-app:assembleRelease :tv-app:assembleRelease
 
       - name: Prepare release assets
         shell: bash
         run: |
           mkdir -p release-assets
-          cp phone-app/build/outputs/apk/debug/phone-app-debug.apk "release-assets/Familia-Phone-${GITHUB_REF_NAME#v}.apk"
-          cp tv-app/build/outputs/apk/debug/tv-app-debug.apk "release-assets/Familia-TV-${GITHUB_REF_NAME#v}.apk"
+          cp phone-app/build/outputs/apk/release/phone-app-release.apk "release-assets/Familia-Phone-${GITHUB_REF_NAME#v}.apk"
+          cp tv-app/build/outputs/apk/release/tv-app-release.apk "release-assets/Familia-TV-${GITHUB_REF_NAME#v}.apk"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
