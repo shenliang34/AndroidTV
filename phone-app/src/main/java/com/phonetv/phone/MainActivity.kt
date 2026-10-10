@@ -48,6 +48,16 @@ class MainActivity : ComponentActivity() {
         refresh()
         refreshSharingCatalog()
     }
+    private val videoPicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (!uris.isNullOrEmpty()) {
+            uris.forEach { uri ->
+                try { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Exception) { }
+            }
+            catalog.setPickedVideos(uris)
+            refresh()
+            refreshSharingCatalog()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -130,9 +140,14 @@ class MainActivity : ComponentActivity() {
                 }
             }
             SectionTitle("共享内容", "选择允许电视访问的文件夹")
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                TextButton(onClick = { requestMediaAccess() }) {
-                    Text(if (mediaPermissionGranted) "重新选择共享视频" else "选择共享视频", color = Accent)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { videoPicker.launch(arrayOf("video/*")) }) {
+                    Text(if (catalog.hasPickedVideos()) "重新选择共享视频" else "选择共享视频", color = Accent)
+                }
+                if (catalog.hasPickedVideos()) {
+                    TextButton(onClick = { catalog.clearPickedVideos(); refresh(); refreshSharingCatalog() }) {
+                        Text("恢复手机视频库", color = Subtitle)
+                    }
                 }
             }
             CardBlock {
@@ -249,7 +264,7 @@ class MainActivity : ComponentActivity() {
     private fun refresh() {
         val granted = hasMediaAccess()
         mediaPermissionGranted = granted
-        val videos = if (granted) try { catalog.scan() } catch (_: Exception) { emptyList() } else emptyList()
+        val videos = if (granted || catalog.hasPickedVideos()) try { catalog.scan() } catch (_: Exception) { emptyList() } else emptyList()
         val disabled = prefs().getStringSet("disabledFolders", emptySet()) ?: emptySet()
         folders = videos.groupBy { it.folder }.map { (name, items) -> FolderShare(name, items.size, name !in disabled) }.sortedByDescending { it.count }
         sharing = MediaServerServiceState.running
@@ -279,7 +294,7 @@ class MainActivity : ComponentActivity() {
         devices = store.devices().map { ConnectedDevice(it.id, it.name, false) }
     }
     private fun startOrAsk() {
-        if (!hasMediaAccess()) { requestMediaAccess(); return }
+        if (!hasMediaAccess() && !catalog.hasPickedVideos()) { requestMediaAccess(); return }
         catalog.scan()
         PairingStore(this).invalidateCode()
         MediaServerServiceState.running = true
