@@ -40,10 +40,17 @@ class MediaServerService : Service() {
         registration = listener
         nsd?.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
     }
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_REFRESH_CATALOG) catalog.scan()
+        return START_STICKY
+    }
     override fun onDestroy() {
         if (registered) try { registration?.let { nsd?.unregisterService(it) } } catch (_: Exception) {}
         server?.stop(); try { multicast?.release() } catch (_: Exception) {}; super.onDestroy()
     }
     override fun onBind(intent: Intent?): IBinder? = null
+
+    companion object {
+        const val ACTION_REFRESH_CATALOG = "com.phonetv.phone.action.REFRESH_CATALOG"
+    }
 }

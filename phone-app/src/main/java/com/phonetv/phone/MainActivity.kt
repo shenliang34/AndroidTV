@@ -44,7 +44,10 @@ class MainActivity : ComponentActivity() {
     private var menu by mutableStateOf(false)
     private var pendingPairing by mutableStateOf<PendingTvPairing?>(null)
     private var mediaPermissionGranted by mutableStateOf(false)
-    private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { refresh() }
+    private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        refresh()
+        refreshSharingCatalog()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -57,7 +60,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onResume() { super.onResume(); refresh() }
+    override fun onResume() { super.onResume(); refresh(); refreshSharingCatalog() }
 
     @Composable
     private fun ShareScreen() {
@@ -127,6 +130,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
             SectionTitle("共享内容", "选择允许电视访问的文件夹")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                TextButton(onClick = { requestMediaAccess() }) {
+                    Text(if (mediaPermissionGranted) "重新选择共享视频" else "选择共享视频", color = Accent)
+                }
+            }
             CardBlock {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                     FolderBadge(Accent.copy(alpha = 0.18f), Icons.Default.Folder, iconTint = Accent)
@@ -143,9 +151,9 @@ class MainActivity : ComponentActivity() {
                         Text(if (mediaPermissionGranted) "还没有找到视频" else "需要访问视频权限", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
                         Spacer(Modifier.height(5.dp))
                         Text(if (mediaPermissionGranted) "手机本地视频会自动显示在这里。" else "授权后，电视才能浏览你选择共享的本地视频。", color = Subtitle, fontSize = 13.sp)
-                        if (!mediaPermissionGranted) {
+                        if (!mediaPermissionGranted && Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                             Spacer(Modifier.height(10.dp))
-                            TextButton(onClick = { permissionRequest.launch(arrayOf(mediaPermission())) }) { Text("授予视频权限", color = Accent) }
+                            TextButton(onClick = { requestMediaAccess() }) { Text("授予视频权限", color = Accent) }
                         }
                     }
                 } else folders.forEachIndexed { index, folder ->
@@ -220,10 +228,26 @@ class MainActivity : ComponentActivity() {
     }
     @Composable private fun switchColors() = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = Accent, uncheckedThumbColor = Color.White, uncheckedTrackColor = Color(0xFF3A3F46), uncheckedBorderColor = Color.Transparent)
 
-    private fun mediaPermission(): String = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_VIDEO else Manifest.permission.READ_EXTERNAL_STORAGE
+    private fun mediaPermissions(): Array<String> = when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> arrayOf(
+            Manifest.permission.READ_MEDIA_VIDEO,
+            Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+        )
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(Manifest.permission.READ_MEDIA_VIDEO)
+        else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+    }
+    private fun hasMediaAccess(): Boolean = when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE ->
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ->
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
+        else -> ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+    }
+    private fun requestMediaAccess() = permissionRequest.launch(mediaPermissions())
     private fun prefs() = getSharedPreferences("phone", MODE_PRIVATE)
     private fun refresh() {
-        val granted = ContextCompat.checkSelfPermission(this, mediaPermission()) == PackageManager.PERMISSION_GRANTED
+        val granted = hasMediaAccess()
         mediaPermissionGranted = granted
         val videos = if (granted) try { catalog.scan() } catch (_: Exception) { emptyList() } else emptyList()
         val disabled = prefs().getStringSet("disabledFolders", emptySet()) ?: emptySet()
@@ -231,6 +255,12 @@ class MainActivity : ComponentActivity() {
         sharing = MediaServerServiceState.running
         val pairing = PairingStore(this)
         devices = pairing.devices().map { ConnectedDevice(it.id, it.name, false) }
+    }
+    private fun refreshSharingCatalog() {
+        if (MediaServerServiceState.running) {
+            ContextCompat.startForegroundService(this,
+                Intent(this, MediaServerService::class.java).setAction(MediaServerService.ACTION_REFRESH_CATALOG))
+        }
     }
     private fun setFolder(name: String, enabled: Boolean) {
         val disabled = (prefs().getStringSet("disabledFolders", emptySet()) ?: emptySet()).toMutableSet()
@@ -249,7 +279,7 @@ class MainActivity : ComponentActivity() {
         devices = store.devices().map { ConnectedDevice(it.id, it.name, false) }
     }
     private fun startOrAsk() {
-        if (ContextCompat.checkSelfPermission(this, mediaPermission()) != PackageManager.PERMISSION_GRANTED) { permissionRequest.launch(arrayOf(mediaPermission())); return }
+        if (!hasMediaAccess()) { requestMediaAccess(); return }
         catalog.scan()
         PairingStore(this).invalidateCode()
         MediaServerServiceState.running = true
