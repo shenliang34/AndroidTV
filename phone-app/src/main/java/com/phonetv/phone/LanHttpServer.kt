@@ -138,12 +138,20 @@ class LanHttpServer(private val context: Context, private val catalog: MediaCata
                     respond(out, 200, "image/jpeg", bytes, head = method == "HEAD")
                 }
                 path.startsWith("/api/videos") -> {
-                    val query = parts[1].substringAfter('?', "").split('&').mapNotNull { pair -> pair.split('=', limit = 2).takeIf { it.size == 2 }?.let { it[0] to it[1] } }.toMap()
+                    val query = parts[1].substringAfter('?', "").split('&').mapNotNull { pair -> pair.split('=', limit = 2).takeIf { it.size == 2 }?.let { it[0] to URLDecoder.decode(it[1], "UTF-8") } }.toMap()
                     val page = (query["page"]?.toIntOrNull() ?: 1).coerceAtLeast(1); val size = (query["pageSize"]?.toIntOrNull() ?: 50).coerceIn(1, 100)
-                    val keyword = query["keyword"]?.lowercase(); val folder = query["folder"]
+                    val keyword = query["keyword"]?.lowercase(); val folder = query["folder"]; val sort = query["sort"]
                     val filtered = sharedVideos().filter { (keyword == null || it.name.lowercase().contains(keyword)) && (folder == null || it.folder == folder) }
+                    val ordered = when (sort) {
+                        "name" -> filtered.sortedBy { it.name.lowercase() }
+                        "size" -> filtered.sortedByDescending { it.size }
+                        "duration" -> filtered.sortedByDescending { it.duration }
+                        "oldest" -> filtered.sortedBy { it.modified }
+                        "newest" -> filtered.sortedByDescending { it.modified }
+                        else -> filtered
+                    }
                     val host = socket.localAddress.hostAddress ?: "127.0.0.1"
-                    val json = """{"page":$page,"pageSize":$size,"total":${filtered.size},"items":${catalog.json(filtered.drop((page-1)*size).take(size), host)}}"""
+                    val json = """{"page":$page,"pageSize":$size,"total":${ordered.size},"items":${catalog.json(ordered.drop((page-1)*size).take(size), host)}}"""
                     respond(out, 200, "application/json", json.toByteArray())
                 }
                 path == "/api/folders" -> {

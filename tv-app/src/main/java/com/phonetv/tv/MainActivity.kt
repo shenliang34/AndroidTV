@@ -24,6 +24,9 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -84,6 +87,7 @@ import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.ui.PlayerView
 import coil.ImageLoader
 import coil.compose.AsyncImage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -91,17 +95,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import org.json.JSONObject
-import java.io.IOException
-import java.net.HttpURLConnection
 import java.net.URL
 import java.util.UUID
 
 data class PhoneDevice(val name: String, val host: String, val port: Int)
 data class RemoteVideo(val id: String, val name: String, val folder: String, val duration: Long, val size: Long, val modified: Long, val thumbnail: String, val stream: String, val token: String)
-data class RemoteCatalog(val total: Int, val videos: List<RemoteVideo>)
 
 class MainActivity : ComponentActivity() {
+    private val mediaClient = PhoneMediaClient()
     private val devices = mutableStateListOf<PhoneDevice>()
+    private val libraryFolders = mutableStateListOf<RemoteFolder>()
     private val videos = mutableStateListOf<RemoteVideo>()
     private var selected by mutableStateOf<PhoneDevice?>(null)
     private var pairingDevice by mutableStateOf<PhoneDevice?>(null)
@@ -121,6 +124,13 @@ class MainActivity : ComponentActivity() {
     private var playing by mutableStateOf<RemoteVideo?>(null)
     private var message by mutableStateOf("正在搜索手机…")
     private var showNetworkSpeed by mutableStateOf(false)
+    private var catalogTotal by mutableStateOf(0)
+    private var loadedPage by mutableStateOf(0)
+    private var hasMoreVideos by mutableStateOf(false)
+    private var loadingCatalog by mutableStateOf(false)
+    private var catalogEpoch by mutableStateOf(0)
+    private var catalogJob: Job? = null
+    private var loadMoreJob: Job? = null
     private var nsd: NsdManager? = null
     private var discovery: NsdManager.DiscoveryListener? = null
     private var player: ExoPlayer? = null
@@ -283,24 +293,28 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun LibraryScreen() {
-        val groups = videos.groupBy { it.folder }.entries.sortedByDescending { it.value.size }
-        val visibleVideos = videos.filter { it.name.contains(searchText, ignoreCase = true) }
-        val sortedVideos = when (sortMode) {
-            "文件名" -> visibleVideos.sortedBy { it.name.lowercase() }
-            "文件大小" -> visibleVideos.sortedByDescending { it.size }
-            "视频时长" -> visibleVideos.sortedByDescending { it.duration }
-            "最旧优先" -> visibleVideos.sortedBy { it.modified }
-            else -> visibleVideos.sortedByDescending { it.modified }
+        val gridState = rememberLazyGridState()
+        LaunchedEffect(selected, authToken, browseMode, sortMode, searchText, folder, catalogEpoch) {
+            if (selected == null || authToken == null) return@LaunchedEffect
+            // Folder list mode also goes through reloadCatalog() (loads /api/folders).
+            delay(if (searchText.isNotBlank() && (browseMode != "文件夹" || folder != null)) 350 else 0)
+            reloadCatalog()
         }
-        val currentSection = when (browseMode) {
-            "最近添加" -> "最近添加"
-            "文件夹" -> "文件夹"
+        LaunchedEffect(gridState, hasMoreVideos, loadingCatalog, browseMode, folder) {
+            snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }
+                .collect { lastVisible ->
+                    if (lastVisible != null && lastVisible >= videos.size - 8) maybeLoadMore()
+                }
+        }
+        val currentSection = when {
+            folder != null -> folder!!
+            browseMode == "最近添加" -> "最近添加"
+            browseMode == "文件夹" -> "文件夹"
             else -> "所有视频"
         }
-        val currentVideoCount = when (browseMode) {
-            "最近添加" -> sortedVideos.size.coerceAtMost(30)
-            "文件夹" -> null
-            else -> sortedVideos.size
+        val currentVideoCount = when {
+            browseMode == "文件夹" && folder == null -> null
+            else -> catalogTotal
         }
         Column(Modifier.fillMaxSize().screenInsets().padding(horizontal = 28.dp, vertical = 12.dp)) {
             Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -313,7 +327,8 @@ class MainActivity : ComponentActivity() {
                     OutlinedTextField(value = searchText, onValueChange = { searchText = it }, singleLine = true,
                         placeholder = { Text("搜索片名", fontSize = 14.sp) }, leadingIcon = { Icon(Icons.Default.Search, null, modifier = Modifier.size(20.dp)) },
                         modifier = Modifier.fillMaxWidth(0.88f).height(52.dp), textStyle = MaterialTheme.typography.bodyMedium,
-                        shape = RoundedCornerShape(14.dp), colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = Color(0xFF333942), focusedBorderColor = Accent))
+                        shape = RoundedCornerShape(14.dp), colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = Color(0xFF333942), focusedBorderColor = Accent),
+                        enabled = browseMode != "文件夹" || folder != null)
                 }
                 Row(Modifier.weight(1f), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
                     BackButton()
@@ -323,39 +338,67 @@ class MainActivity : ComponentActivity() {
             Row(Modifier.fillMaxWidth().height(44.dp), verticalAlignment = Alignment.CenterVertically) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf("全部视频", "最近添加", "文件夹").forEach { mode ->
-                        BrowseChip(mode, selected = browseMode == mode) { browseMode = mode; folder = if (mode == "文件夹") folder else null }
+                        BrowseChip(mode, selected = browseMode == mode && folder == null) {
+                            browseMode = mode
+                            folder = null
+                            if (mode != "文件夹") catalogEpoch++
+                        }
                     }
                 }
                 Spacer(Modifier.weight(1f))
-                var sortExpanded by remember { mutableStateOf(false) }
-                Box {
-                    TextButton(onClick = { sortExpanded = true }) { Text("排序：$sortMode", color = Accent, fontSize = 15.sp) }
-                    DropdownMenu(expanded = sortExpanded, onDismissRequest = { sortExpanded = false }) {
-                        listOf("最新优先", "最旧优先", "文件名", "文件大小", "视频时长").forEach { option ->
-                            DropdownMenuItem(text = { Text(option) }, onClick = { sortMode = option; sortExpanded = false })
+                if (browseMode != "文件夹" || folder != null) {
+                    var sortExpanded by remember { mutableStateOf(false) }
+                    Box {
+                        TextButton(onClick = { sortExpanded = true }) { Text("排序：$sortMode", color = Accent, fontSize = 15.sp) }
+                        DropdownMenu(expanded = sortExpanded, onDismissRequest = { sortExpanded = false }) {
+                            listOf("最新优先", "最旧优先", "文件名", "文件大小", "视频时长").forEach { option ->
+                                DropdownMenuItem(text = { Text(option) }, onClick = { sortMode = option; sortExpanded = false; catalogEpoch++ })
+                            }
                         }
                     }
                 }
             }
             Spacer(Modifier.height(8.dp))
-            if (groups.isEmpty()) {
-                EmptyLibrary(message)
-            } else if (browseMode == "文件夹") {
-                LazyVerticalGrid(columns = GridCells.Adaptive(minSize = 220.dp),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp),
-                    modifier = Modifier.weight(1f), contentPadding = PaddingValues(bottom = 10.dp)) {
-                    gridItems(groups.toList(), key = { it.key }) { (name, items) ->
-                        FolderCard(name, items.size) { folder = name }
+            when {
+                browseMode == "文件夹" && folder == null -> {
+                    if (libraryFolders.isEmpty()) {
+                        EmptyLibrary(if (loadingCatalog) "正在加载文件夹…" else message)
+                    } else {
+                        LazyVerticalGrid(columns = GridCells.Adaptive(minSize = 220.dp),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp),
+                            modifier = Modifier.weight(1f), contentPadding = PaddingValues(bottom = 10.dp)) {
+                            gridItems(libraryFolders.toList(), key = { it.name }) { item ->
+                                FolderCard(item.name, item.videoCount) {
+                                    folder = item.name
+                                    browseMode = "文件夹"
+                                    catalogEpoch++
+                                }
+                            }
+                        }
                     }
                 }
-            } else if (sortedVideos.isEmpty()) {
-                EmptyLibrary("没有找到匹配的视频，换个片名或清除搜索条件试试。")
-            } else {
-                val list = if (browseMode == "最近添加") sortedVideos.take(30) else sortedVideos
-                LazyVerticalGrid(columns = GridCells.Adaptive(minSize = 220.dp),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.weight(1f), contentPadding = PaddingValues(bottom = 10.dp)) {
-                    gridItems(list, key = { it.id }) { video -> PosterCard(video, onFocus = {}, onClick = { requestPlay(video) }, fillCell = true) }
+                loadingCatalog && videos.isEmpty() -> EmptyLibrary("正在加载视频…")
+                videos.isEmpty() -> EmptyLibrary(message)
+                else -> {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(minSize = 220.dp),
+                        state = gridState,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(bottom = 10.dp),
+                    ) {
+                        gridItems(videos.toList(), key = { it.id }) { video ->
+                            PosterCard(video, onFocus = {}, onClick = { requestPlay(video) }, fillCell = true)
+                        }
+                        if (loadingCatalog && videos.isNotEmpty()) {
+                            item(key = "loading-more") {
+                                Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                                    CircularProgressIndicator(modifier = Modifier.size(22.dp), color = Accent, strokeWidth = 2.dp)
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -402,9 +445,9 @@ class MainActivity : ComponentActivity() {
     private fun EmptyLibrary(text: String) {
         Column(Modifier.fillMaxWidth().height(190.dp).clip(RoundedCornerShape(20.dp)).background(Panel).padding(24.dp),
             verticalArrangement = Arrangement.Center) {
-            Text(if (videos.isEmpty()) "这里还没有视频" else "没有找到匹配的视频", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+            Text(if (loadingCatalog) "正在加载" else if (searchText.isNotBlank()) "没有找到匹配的视频" else "这里还没有视频", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(8.dp))
-            Text(if (videos.isEmpty()) text else "换个片名试试，或清除搜索条件。", color = Sub, fontSize = 15.sp)
+            Text(text, color = Sub, fontSize = 15.sp)
         }
     }
 
@@ -424,15 +467,44 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun FolderScreen(name: String) {
-        val items = videos.filter { it.folder == name }
-        var selectedIndex by remember(name) { mutableIntStateOf(if (items.isEmpty()) 0 else 1) }
+        val listState = rememberLazyListState()
+        var selectedIndex by remember(name) { mutableIntStateOf(if (videos.isEmpty()) 0 else 1) }
+        LaunchedEffect(name, selected, authToken, sortMode, searchText, catalogEpoch) {
+            if (selected == null || authToken == null) return@LaunchedEffect
+            delay(if (searchText.isNotBlank()) 350 else 0)
+            reloadCatalog()
+        }
+        LaunchedEffect(listState, hasMoreVideos, loadingCatalog, name) {
+            snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }
+                .collect { lastVisible ->
+                    if (lastVisible != null && lastVisible >= videos.size - 4) maybeLoadMore()
+                }
+        }
         BackHandler { goBack() }
         Column(Modifier.fillMaxSize().screenInsets().background(Color(0xFF0B0E14)).padding(horizontal = 28.dp, vertical = 12.dp)) {
-            PageHeader(name, "来自手机 ${selectedIndex}/${items.size} 部")
+            PageHeader(name, if (catalogTotal > 0) "来自手机 ${selectedIndex}/${catalogTotal} 部 · 已加载 ${videos.size}" else "来自手机")
             Spacer(Modifier.height(16.dp))
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(end = 28.dp, bottom = 8.dp)) {
-                itemsIndexed(items, key = { _, video -> video.id }) { index, video ->
-                    PosterCard(video, onFocus = { selectedIndex = index + 1 }, onClick = { requestPlay(video) })
+            when {
+                loadingCatalog && videos.isEmpty() -> EmptyLibrary("正在加载文件夹…")
+                videos.isEmpty() -> EmptyLibrary("这个文件夹里没有视频")
+                else -> {
+                    LazyRow(
+                        state = listState,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(end = 28.dp, bottom = 8.dp),
+                    ) {
+                        itemsIndexed(videos.toList(), key = { _, video -> video.id }) { index, video ->
+                            PosterCard(video, onFocus = { selectedIndex = index + 1 }, onClick = { requestPlay(video) })
+                        }
+                        if (loadingCatalog) {
+                            item(key = "folder-loading") {
+                                Box(Modifier.width(80.dp).height(128.dp), contentAlignment = Alignment.Center) {
+                                    CircularProgressIndicator(modifier = Modifier.size(22.dp), color = Accent, strokeWidth = 2.dp)
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -786,20 +858,20 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             try {
                 val (phoneId, cachedToken) = withContext(Dispatchers.IO) {
-                    val info = requestJson(URL("http://${device.host}:${device.port}/api/device"))
+                    val info = mediaClient.fetchDevice(device)
                     val id = info.getString("deviceId")
                     id to getSharedPreferences("pairing", MODE_PRIVATE).getString("token_$id", null)
                 }
                 if (!cachedToken.isNullOrBlank()) {
                     try {
-                        val catalog = withContext(Dispatchers.IO) { loadVideos(device, cachedToken) }
-                        completeConnection(device, cachedToken, catalog)
+                        withContext(Dispatchers.IO) { mediaClient.fetchFolders(device, cachedToken) }
+                        completeConnection(device, cachedToken)
                         return@launch
-                    } catch (error: HttpStatusException) {
+                    } catch (error: PhoneMediaClient.HttpStatusException) {
                         if (error.statusCode != 401) throw error
                         getSharedPreferences("pairing", MODE_PRIVATE).edit().remove("token_$phoneId").apply()
                         selected = null
-                        videos.clear()
+                        clearCatalog()
                         authToken = null
                         pairingPhoneId = phoneId
                         pairingDevice = device
@@ -828,33 +900,37 @@ class MainActivity : ComponentActivity() {
                         .put("deviceId", tvDeviceId())
                         .put("deviceName", android.os.Build.MODEL.ifBlank { "Android TV" })
                         .toString()
-                    requestJson(URL("http://${device.host}:${device.port}/api/pair/request"), method = "POST", body = body).getString("requestId")
+                    mediaClient.requestObject(URL("http://${device.host}:${device.port}/api/pair/request"), method = "POST", body = body).getString("requestId")
                 }
                 pairingRequestId = requestId
                 while (true) {
                     delay(1400)
-                    val status = withContext(Dispatchers.IO) { requestJson(URL("http://${device.host}:${device.port}/api/pair/status?requestId=$requestId")) }
+                    val status = withContext(Dispatchers.IO) {
+                        mediaClient.requestObject(URL("http://${device.host}:${device.port}/api/pair/status?requestId=$requestId"))
+                    }
                     when (status.optString("status")) {
                         "pending" -> Unit
                         "approved" -> {
                             val token = status.optString("token").takeIf { it.isNotBlank() } ?: error("授权结果无效")
                             getSharedPreferences("pairing", MODE_PRIVATE).edit().putString("token_$phoneId", token).apply()
-                            val catalog = withContext(Dispatchers.IO) {
-                                val loaded = loadVideos(device, token)
-                                requestJson(URL("http://${device.host}:${device.port}/api/pair/complete"), method = "POST", body = JSONObject().put("requestId", requestId).toString())
-                                loaded
+                            withContext(Dispatchers.IO) {
+                                mediaClient.requestObject(
+                                    URL("http://${device.host}:${device.port}/api/pair/complete"),
+                                    method = "POST",
+                                    body = JSONObject().put("requestId", requestId).toString(),
+                                )
                             }
                             pairingDevice = null
                             pairingPhoneId = null
                             pairingRequestId = null
-                            completeConnection(device, token, catalog)
+                            completeConnection(device, token)
                             return@launch
                         }
                         "rejected" -> { pairingError = "手机拒绝了本次连接请求。"; return@launch }
                         else -> { pairingError = "配对请求已过期，请重新连接手机。"; return@launch }
                     }
                 }
-            } catch (error: HttpStatusException) {
+            } catch (error: PhoneMediaClient.HttpStatusException) {
                 pairingError = "配对请求失败（HTTP ${error.statusCode}）"
             } catch (_: Exception) {
                 pairingError = "连接失败，请确认两台设备在同一网络且手机共享已开启。"
@@ -868,7 +944,13 @@ class MainActivity : ComponentActivity() {
         val id = pairingRequestId
         val device = pairingDevice
         if (id != null && device != null) lifecycleScope.launch(Dispatchers.IO) {
-            try { requestJson(URL("http://${device.host}:${device.port}/api/pair/cancel"), method = "POST", body = JSONObject().put("requestId", id).toString()) } catch (_: Exception) {}
+            try {
+                mediaClient.requestObject(
+                    URL("http://${device.host}:${device.port}/api/pair/cancel"),
+                    method = "POST",
+                    body = JSONObject().put("requestId", id).toString(),
+                )
+            } catch (_: Exception) {}
         }
         pairingDevice = null
         pairingPhoneId = null
@@ -881,57 +963,143 @@ class MainActivity : ComponentActivity() {
         return prefs.getString("deviceId", null) ?: UUID.randomUUID().toString().also { prefs.edit().putString("deviceId", it).apply() }
     }
 
-    private fun loadVideos(device: PhoneDevice, token: String): RemoteCatalog {
-        val loaded = mutableListOf<RemoteVideo>()
-        var page = 1
-        var total = Int.MAX_VALUE
-        while (loaded.size < total) {
-            val result = requestJson(URL("http://${device.host}:${device.port}/api/videos?page=$page&pageSize=100"), token = token)
-            val items = result.getJSONArray("items")
-            total = result.optInt("total", loaded.size + items.length()).coerceAtLeast(0)
-            if (items.length() == 0) break
-            for (index in 0 until items.length()) {
-                val video = items.getJSONObject(index)
-                loaded += RemoteVideo(
-                    video.getString("id"), video.getString("name"), video.optString("folder", "其他"),
-                    video.optLong("duration"), video.optLong("size"), video.optLong("modifiedTime"), video.optString("thumbnailUrl"), video.optString("streamUrl"), token
-                )
-            }
-            page++
-        }
-        return RemoteCatalog(total.coerceAtMost(Int.MAX_VALUE), loaded)
+    private fun sortParam(): String = when (sortMode) {
+        "文件名" -> "name"
+        "文件大小" -> "size"
+        "视频时长" -> "duration"
+        "最旧优先" -> "oldest"
+        else -> "newest"
     }
 
-    private fun requestJson(url: URL, token: String? = null, method: String = "GET", body: String? = null): JSONObject {
-        val connection = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = method
-            connectTimeout = 5000
-            readTimeout = 10000
-            if (token != null) setRequestProperty("Authorization", "Bearer $token")
-            if (body != null) {
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            }
-        }
-        try {
-            if (body != null) connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-            val status = connection.responseCode
-            if (status !in 200..299) throw HttpStatusException(status)
-            return connection.inputStream.bufferedReader(Charsets.UTF_8).use { JSONObject(it.readText()) }
-        } finally {
-            connection.disconnect()
-        }
-    }
+    private fun pageSizeForCurrentMode(): Int =
+        if (browseMode == "最近添加" && folder == null) RECENT_PAGE_SIZE else DEFAULT_PAGE_SIZE
 
-    private fun completeConnection(device: PhoneDevice, token: String, catalog: RemoteCatalog) {
-        authToken = token
+    private fun clearCatalog() {
+        catalogJob?.cancel()
+        catalogJob = null
+        loadMoreJob?.cancel()
+        loadMoreJob = null
         videos.clear()
-        videos.addAll(catalog.videos)
-        selected = device
-        message = if (catalog.total == 0) "手机上没有可共享的视频" else "已加载 ${videos.size} / ${catalog.total} 个视频"
+        libraryFolders.clear()
+        catalogTotal = 0
+        loadedPage = 0
+        hasMoreVideos = false
+        loadingCatalog = false
     }
 
-    private class HttpStatusException(val statusCode: Int) : IOException("HTTP $statusCode")
+    private fun reloadCatalog() {
+        val device = selected ?: return
+        val token = authToken ?: return
+        loadMoreJob?.cancel()
+        loadMoreJob = null
+        catalogJob?.cancel()
+        catalogJob = lifecycleScope.launch {
+            loadingCatalog = true
+            videos.clear()
+            loadedPage = 0
+            hasMoreVideos = false
+            catalogTotal = 0
+            try {
+                if (browseMode == "文件夹" && folder == null) {
+                    val folders = withContext(Dispatchers.IO) { mediaClient.fetchFolders(device, token) }
+                    libraryFolders.clear()
+                    libraryFolders.addAll(folders)
+                    message = if (folders.isEmpty()) "手机上没有可共享的视频" else "${folders.size} 个文件夹"
+                    return@launch
+                }
+                val page = withContext(Dispatchers.IO) {
+                    mediaClient.fetchVideoPage(
+                        device = device,
+                        token = token,
+                        page = 1,
+                        pageSize = pageSizeForCurrentMode(),
+                        folder = folder,
+                        keyword = searchText.trim().takeIf { it.isNotEmpty() },
+                        sort = sortParam(),
+                    )
+                }
+                videos.addAll(page.items)
+                catalogTotal = page.total
+                loadedPage = 1
+                val allowMore = folder != null || browseMode != "最近添加"
+                hasMoreVideos = allowMore && videos.size < page.total && page.items.isNotEmpty()
+                message = when {
+                    page.total == 0 && searchText.isNotBlank() -> "没有找到匹配的视频，换个片名或清除搜索条件试试。"
+                    page.total == 0 -> "手机上没有可共享的视频"
+                    else -> "已加载 ${videos.size} / $catalogTotal 个视频"
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                message = "无法加载视频列表，请检查手机共享是否仍在运行"
+            } finally {
+                loadingCatalog = false
+            }
+        }
+    }
+
+    private fun maybeLoadMore() {
+        if (!hasMoreVideos || loadingCatalog) return
+        val device = selected ?: return
+        val token = authToken ?: return
+        if (browseMode == "最近添加" && folder == null) return
+        loadMoreJob?.cancel()
+        loadMoreJob = lifecycleScope.launch {
+            loadingCatalog = true
+            try {
+                val next = loadedPage + 1
+                val page = withContext(Dispatchers.IO) {
+                    mediaClient.fetchVideoPage(
+                        device = device,
+                        token = token,
+                        page = next,
+                        pageSize = DEFAULT_PAGE_SIZE,
+                        folder = folder,
+                        keyword = searchText.trim().takeIf { it.isNotEmpty() },
+                        sort = sortParam(),
+                    )
+                }
+                if (page.items.isEmpty()) {
+                    hasMoreVideos = false
+                } else {
+                    val seen = videos.mapTo(HashSet()) { it.id }
+                    page.items.filter { it.id !in seen }.forEach { videos.add(it) }
+                    catalogTotal = page.total
+                    loadedPage = next
+                    hasMoreVideos = videos.size < page.total
+                    message = "已加载 ${videos.size} / $catalogTotal 个视频"
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                hasMoreVideos = false
+            } finally {
+                loadingCatalog = false
+            }
+        }
+    }
+
+    private fun completeConnection(device: PhoneDevice, token: String) {
+        authToken = token
+        selected = device
+        searchText = ""
+        sortMode = "最新优先"
+        browseMode = "全部视频"
+        folder = null
+        clearCatalog()
+        message = "正在加载片库…"
+        lifecycleScope.launch {
+            try {
+                val folders = withContext(Dispatchers.IO) { mediaClient.fetchFolders(device, token) }
+                libraryFolders.clear()
+                libraryFolders.addAll(folders)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // Video reload is triggered by selected/authToken; folder list can retry from 文件夹 tab.
+            }
+        }
+    }
 
     private fun requestPlay(video: RemoteVideo) {
         val saved = savedPosition(video)
@@ -971,7 +1139,7 @@ class MainActivity : ComponentActivity() {
         when {
             playing != null -> stopPlayback()
             folder != null -> folder = null
-            selected != null -> { selected = null; authToken = null; videos.clear() }
+            selected != null -> { selected = null; authToken = null; folder = null; clearCatalog() }
             else -> finish()
         }
     }
@@ -994,6 +1162,11 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() { stopPlayback(); discovery?.let { try { nsd?.stopServiceDiscovery(it) } catch (_: Exception) {} }; super.onDestroy() }
     private fun formatDuration(ms: Long): String { val s = ms / 1000; return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s / 60 % 60, s % 60) else "%d:%02d".format(s / 60, s % 60) }
     private fun formatClock(ms: Long): String { val s = ms / 1000; return "%d:%02d".format(s / 60, s % 60) }
+
+    companion object {
+        private const val DEFAULT_PAGE_SIZE = 50
+        private const val RECENT_PAGE_SIZE = 30
+    }
 }
 
 private val Bg = Color(0xFF101014)
