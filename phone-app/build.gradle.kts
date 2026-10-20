@@ -13,7 +13,7 @@ val signingKeyPassword = providers.gradleProperty("SIGNING_KEY_PASSWORD")
     .get()
 
 android { namespace = "com.phonetv.phone"; compileSdk = 36
-    defaultConfig { applicationId = "com.phonetv.phone"; minSdk = 26; targetSdk = 35; versionCode = 10; versionName = "1.1.17" }
+    defaultConfig { applicationId = "com.phonetv.phone"; minSdk = 26; targetSdk = 35; versionCode = 11; versionName = "1.1.18" }
     signingConfigs {
         create("release") {
             storeFile = rootProject.file("sll_test")
