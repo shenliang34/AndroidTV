@@ -78,6 +78,27 @@ class PhoneMediaClient {
     fun fetchDevice(device: PhoneDevice): JSONObject =
         requestObject(URL("http://${device.host}:${device.port}/api/device"))
 
+    /** Refresh just the playing video after rediscovery, preserving on-demand pagination. */
+    fun refreshVideo(device: PhoneDevice, token: String, video: RemoteVideo): RemoteVideo? {
+        val stream = "http://${device.host}:${device.port}/api/videos/${enc(video.id)}/stream"
+        val connection = (URL(stream).openConnection() as HttpURLConnection).apply {
+            requestMethod = "HEAD"
+            connectTimeout = 5000
+            readTimeout = 15000
+            setRequestProperty("Authorization", "Bearer $token")
+        }
+        try {
+            val status = connection.responseCode
+            if (status == 404) return null
+            if (status !in 200..299) throw HttpStatusException(status)
+            return video.copy(
+                stream = stream,
+                thumbnail = "http://${device.host}:${device.port}/api/videos/${enc(video.id)}/thumbnail",
+                token = token,
+            )
+        } finally { connection.disconnect() }
+    }
+
     fun requestObject(
         url: URL,
         token: String? = null,
