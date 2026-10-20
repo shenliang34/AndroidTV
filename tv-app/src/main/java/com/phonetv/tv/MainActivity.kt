@@ -86,6 +86,7 @@ import coil.ImageLoader
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -96,7 +97,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.UUID
 
-data class PhoneDevice(val name: String, val host: String, val port: Int)
+data class PhoneDevice(val name: String, val host: String, val port: Int, val deviceId: String = "", val serviceName: String = name)
 data class RemoteVideo(val id: String, val name: String, val folder: String, val duration: Long, val size: Long, val modified: Long, val thumbnail: String, val stream: String, val token: String)
 data class RemoteCatalog(val total: Int, val videos: List<RemoteVideo>)
 
@@ -123,7 +124,10 @@ class MainActivity : ComponentActivity() {
     private var showNetworkSpeed by mutableStateOf(false)
     private var nsd: NsdManager? = null
     private var discovery: NsdManager.DiscoveryListener? = null
-    private var player: ExoPlayer? = null
+    private var player by mutableStateOf<ExoPlayer?>(null)
+    private var reconnectJob: Job? = null
+    private var progressJob: Job? = null
+    private var recoveryPlayWhenReady: Boolean? = null
     private var bandwidthMeter: DefaultBandwidthMeter? = null
     private val resolving = mutableSetOf<String>()
     private val secureImageLoader by lazy {
@@ -338,6 +342,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
             Spacer(Modifier.height(8.dp))
+            if (message.startsWith("连接已断开") || message.startsWith("无法连接") || message.startsWith("授权已失效")) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(message, color = Accent, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { recoverConnection() }) { Text("重试连接") }
+                }
+            }
             if (groups.isEmpty()) {
                 EmptyLibrary(message)
             } else if (browseMode == "文件夹") {
@@ -688,7 +698,7 @@ class MainActivity : ComponentActivity() {
                     Spacer(Modifier.width(8.dp))
                     Text(playbackError ?: "正在缓冲…", color = if (playbackError != null) Color(0xFFFF8A80) else Color.White, fontSize = 14.sp)
                     if (playbackError != null) {
-                        TextButton(onClick = { startVideo(video, position) }) { Text("重试") }
+                        TextButton(onClick = { recoverConnection() }) { Text("重试连接") }
                         TextButton(onClick = { goBack() }) { Text("返回") }
                     }
                 }
@@ -714,7 +724,7 @@ class MainActivity : ComponentActivity() {
         val siblings = videos.filter { it.folder == video.folder }
         val index = siblings.indexOfFirst { it.id == video.id }
         val next = siblings.getOrNull(index + delta) ?: return
-        play(next)
+        startVideo(next, 0L)
     }
 
     private fun startDiscovery() {
@@ -732,7 +742,10 @@ class MainActivity : ComponentActivity() {
                     }
                 })
             }
-            override fun onServiceLost(info: NsdServiceInfo) { runOnUiThread { devices.removeAll { it.name == info.serviceName }; if (selected?.name == info.serviceName) selected = null } }
+            override fun onServiceLost(info: NsdServiceInfo) { runOnUiThread {
+                devices.removeAll { it.serviceName == info.serviceName }
+                if (selected?.serviceName == info.serviceName) recoverConnection()
+            } }
             override fun onDiscoveryStopped(type: String) {}
             override fun onStartDiscoveryFailed(type: String, errorCode: Int) { message = "搜索失败 $errorCode" }
             override fun onStopDiscoveryFailed(type: String, errorCode: Int) {}
@@ -757,6 +770,18 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun addDevice(device: PhoneDevice) {
+        lifecycleScope.launch {
+            try {
+                val info = withContext(Dispatchers.IO) {
+                    requestJson(URL("http://${device.host}:${device.port}/api/device"))
+                }
+                rememberDevice(device.copy(deviceId = info.getString("deviceId"), name = info.getString("deviceName")))
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { /* An advertisement is not proof that the server is ready. */ }
+        }
+    }
+
+    private fun rememberDevice(device: PhoneDevice) {
         val localHosts = localHosts()
         val host = device.host.removePrefix("/").substringBefore('%')
         val normalized = device.copy(host = host)
@@ -764,8 +789,11 @@ class MainActivity : ComponentActivity() {
         if (host in localHosts && devices.any { it.host == "127.0.0.1" }) {
             devices.removeAll { it.host == "127.0.0.1" }
         }
-        if (devices.any { it.host == host || it.name == normalized.name }) return
-        devices.add(normalized)
+        val index = devices.indexOfFirst { it.deviceId == normalized.deviceId }
+        if (index >= 0) devices[index] = normalized else devices.add(normalized)
+        val current = selected
+        if (current != null && current.deviceId == normalized.deviceId &&
+            (current.host != normalized.host || current.port != normalized.port || playbackError != null)) recoverConnection()
         message = "选择一台手机"
     }
 
@@ -790,10 +818,11 @@ class MainActivity : ComponentActivity() {
                     val id = info.getString("deviceId")
                     id to getSharedPreferences("pairing", MODE_PRIVATE).getString("token_$id", null)
                 }
+                val identifiedDevice = device.copy(deviceId = phoneId)
                 if (!cachedToken.isNullOrBlank()) {
                     try {
                         val catalog = withContext(Dispatchers.IO) { loadVideos(device, cachedToken) }
-                        completeConnection(device, cachedToken, catalog)
+                        completeConnection(identifiedDevice, cachedToken, catalog)
                         return@launch
                     } catch (error: HttpStatusException) {
                         if (error.statusCode != 401) throw error
@@ -810,7 +839,7 @@ class MainActivity : ComponentActivity() {
                 pairingDevice = device
                 pairingError = null
                 message = "等待手机确认"
-                requestPhoneApproval(device, phoneId)
+                requestPhoneApproval(identifiedDevice, phoneId)
             } catch (_: Exception) { message = "无法连接手机，请确认手机共享已开启" }
         }
     }
@@ -938,15 +967,82 @@ class MainActivity : ComponentActivity() {
         if (saved > 5_000) resumePrompt = video else startVideo(video, 0L)
     }
 
-    private fun savedPosition(video: RemoteVideo): Long = getSharedPreferences("playback", MODE_PRIVATE).getLong("${selected?.host}:${video.id}", 0L)
+    private fun progressKey(video: RemoteVideo): String? = selected?.deviceId
+        ?.takeIf { it.isNotBlank() }?.let { "$it:${video.id}" }
+
+    private fun savedPosition(video: RemoteVideo): Long {
+        val key = progressKey(video) ?: return 0L
+        val prefs = getSharedPreferences("playback", MODE_PRIVATE)
+        if (!prefs.contains(key)) {
+            val legacy = "${selected?.host}:${video.id}"
+            if (prefs.contains(legacy)) prefs.edit().putLong(key, prefs.getLong(legacy, 0L)).remove(legacy).apply()
+        }
+        return prefs.getLong(key, 0L)
+    }
+
+    private fun recoverConnection() {
+        val phone = selected ?: return
+        val token = authToken ?: return
+        if (reconnectJob?.isActive == true) return
+        val video = playing
+        val position = player?.currentPosition ?: 0L
+        val shouldPlay = recoveryPlayWhenReady ?: (player?.playWhenReady ?: true)
+        recoveryPlayWhenReady = shouldPlay
+        player?.let { saveProgress(video, it); it.pause() }
+        reconnectJob = lifecycleScope.launch {
+            try {
+                for (wait in listOf(1_000L, 2_000L, 5_000L, 10_000L)) {
+                    message = "连接已断开，正在重新连接手机…"
+                    if (video != null) playbackError = message
+                    delay(wait)
+                    val candidate = devices.firstOrNull { it.deviceId == phone.deviceId } ?: phone
+                    try {
+                        val catalog = withContext(Dispatchers.IO) {
+                            val info = requestJson(URL("http://${candidate.host}:${candidate.port}/api/device"))
+                            if (info.getString("deviceId") != phone.deviceId) throw IOException("手机地址已被其他设备使用")
+                            loadVideos(candidate, token)
+                        }
+                        completeConnection(candidate, token, catalog)
+                        if (video != null) {
+                            val refreshed = catalog.videos.firstOrNull { it.id == video.id }
+                            if (refreshed == null) {
+                                playbackError = "视频已删除或停止共享，请返回列表"
+                            } else {
+                                // The replacement player must not overwrite the last good checkpoint.
+                                player?.release(); player = null
+                                pendingResume = position
+                                playbackError = null
+                                play(refreshed)
+                                player?.playWhenReady = shouldPlay
+                                recoveryPlayWhenReady = null
+                            }
+                        }
+                        return@launch
+                    } catch (cancelled: CancellationException) { throw cancelled }
+                    catch (error: HttpStatusException) {
+                        if (error.statusCode == 401) {
+                            message = "授权已失效，请返回设备列表重新连接并在手机确认"
+                            if (video != null) playbackError = message
+                            return@launch
+                        }
+                    } catch (_: Exception) { /* Retry with the latest discovery address. */ }
+                }
+                message = "无法连接手机，请确认共享已开启后重试"
+                if (video != null) playbackError = message
+            } finally { reconnectJob = null }
+        }
+    }
 
     private fun startVideo(video: RemoteVideo, position: Long) {
+        reconnectJob?.cancel(); reconnectJob = null
+        recoveryPlayWhenReady = null
         pendingResume = position
         playbackError = null
         play(video)
     }
 
     private fun play(video: RemoteVideo) {
+        progressJob?.cancel()
         val previousVideo = playing
         player?.let { previous -> saveProgress(previousVideo, previous); previous.release() }
         playing = video
@@ -958,25 +1054,42 @@ class MainActivity : ComponentActivity() {
         player = ExoPlayer.Builder(this).setMediaSourceFactory(mediaSourceFactory).setBandwidthMeter(bandwidthMeter!!).build()
             .also { exo ->
                 exo.addListener(object : Player.Listener {
-                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) { playbackError = "播放失败：${error.errorCodeName}" }
-                    override fun onPlaybackStateChanged(state: Int) { if (state == Player.STATE_READY) playbackError = null }
+                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                        playbackError = "播放失败：${error.errorCodeName}"
+                        if (error.errorCode in 2000..2002 || error.errorCode == 2004) recoverConnection()
+                    }
+                    override fun onPlaybackStateChanged(state: Int) {
+                        if (state == Player.STATE_READY && reconnectJob?.isActive != true) playbackError = null
+                        if (state == Player.STATE_ENDED) saveProgress(video, exo)
+                    }
+                    override fun onIsPlayingChanged(isPlaying: Boolean) { if (!isPlaying) saveProgress(video, exo) }
                 })
                 exo.setMediaItem(MediaItem.fromUri(video.stream)); exo.prepare()
                 if ((pendingResume ?: 0L) > 0L) exo.seekTo(pendingResume!!)
+                pendingResume = null
                 exo.playWhenReady = true
             }
+        progressJob = lifecycleScope.launch {
+            while (true) {
+                delay(5_000)
+                player?.let { saveProgress(playing, it) }
+            }
+        }
     }
 
     private fun goBack() {
         when {
             playing != null -> stopPlayback()
             folder != null -> folder = null
-            selected != null -> { selected = null; authToken = null; videos.clear() }
+            selected != null -> { reconnectJob?.cancel(); selected = null; authToken = null; videos.clear() }
             else -> finish()
         }
     }
 
     private fun stopPlayback() {
+        recoveryPlayWhenReady = null
+        reconnectJob?.cancel(); reconnectJob = null
+        progressJob?.cancel(); progressJob = null
         player?.let { exo ->
             saveProgress(playing, exo)
             exo.release()
@@ -985,11 +1098,17 @@ class MainActivity : ComponentActivity() {
     }
     private fun saveProgress(video: RemoteVideo?, exo: ExoPlayer) {
         if (video == null) return
-        val key = "${selected?.host}:${video.id}"
+        val key = progressKey(video) ?: return
         val prefs = getSharedPreferences("playback", MODE_PRIVATE)
-        if (exo.currentPosition > 5_000 && exo.duration > 0 && exo.currentPosition < exo.duration - 5_000) {
+        // Preparing/failed players may have no timeline yet: retain the existing checkpoint.
+        if (exo.duration <= 0 || exo.playbackState == Player.STATE_IDLE) return
+        if (exo.currentPosition > 5_000 && exo.currentPosition < exo.duration - 5_000 && exo.playbackState != Player.STATE_ENDED) {
             prefs.edit().putLong(key, exo.currentPosition).apply()
         } else prefs.edit().remove(key).apply()
+    }
+    override fun onStop() {
+        player?.let { saveProgress(playing, it) }
+        super.onStop()
     }
     override fun onDestroy() { stopPlayback(); discovery?.let { try { nsd?.stopServiceDiscovery(it) } catch (_: Exception) {} }; super.onDestroy() }
     private fun formatDuration(ms: Long): String { val s = ms / 1000; return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s / 60 % 60, s % 60) else "%d:%02d".format(s / 60, s % 60) }
